@@ -43,18 +43,28 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 		if err != nil {
 			t.isNumeric = false
 		} else {
-			if strings.ContainsAny(cell, ".eE") {
-				t.isDecimal = true
-			}
 			if f < 0 {
 				t.isOnlyPos = false
 			}
-			abs := f
-			if abs < 0 {
-				abs = -abs
-			}
-			if uint64(abs) > t.maxVal {
-				t.maxVal = uint64(abs)
+			// maxVal must come from an exact integer parse, not  float64
+			if strings.ContainsAny(cell, ".eE") {
+				t.isDecimal = true
+			} else if u, err := strconv.ParseUint(cell, 10, 64); err == nil {
+				if u > t.maxVal {
+					t.maxVal = u
+				}
+			} else if n, err := strconv.ParseInt(cell, 10, 64); err == nil {
+				abs := uint64(n)
+				if n < 0 {
+					abs = uint64(-n)
+				}
+				if abs > t.maxVal {
+					t.maxVal = abs
+				}
+			} else {
+				// digits-only but too big for a 64-bit int; this format's
+				// widest int type can't hold it, so fall back to float64
+				t.isDecimal = true
 			}
 		}
 	}
