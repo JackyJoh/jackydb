@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/csv"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
@@ -32,8 +33,10 @@ func NewTypeTracker() TypeTracker {
 }
 
 // UpdateFlags inspects a single cell for a column and flips tracker flags off
-// flags only move one-way (true -> false); flags cannot be re-enabled
-func (t *TypeTracker) UpdateFlags(cell string) {
+// flags only move one-way (true -> false); flags cannot be re-enabled.
+// Returns an error if the cell can't be represented at all (exceeds the
+// 255-byte varchar ceiling of the format).
+func (t *TypeTracker) UpdateFlags(cell string) error {
 	// numeric check (covers int/uint/float)
 	if t.isNumeric {
 		f, err := strconv.ParseFloat(cell, 64)
@@ -63,14 +66,22 @@ func (t *TypeTracker) UpdateFlags(cell string) {
 		}
 	}
 
-	// track largest cell length in case this column falls back to varchar(N)
+	// track largest cell length in case this column falls back to varchar(N).
+	// only fatal once the column can no longer resolve to a fixed-width type
+	// (numeric/bool store the parsed value, not the cell's raw bytes, so their
+	// length doesn't matter).
 	cellLen := len(cell)
+	if !t.isNumeric && !t.isBoolVals && cellLen > 255 {
+		return errors.New("cell exceeds 255-byte varchar limit")
+	}
 	if cellLen > 255 {
 		cellLen = 255
 	}
 	if uint8(cellLen) > t.maxCellLen {
 		t.maxCellLen = uint8(cellLen)
 	}
+
+	return nil
 }
 
 // picks a type based on the flags; falls back to a minimal varchar(N) instead of plain string
@@ -172,7 +183,8 @@ func TestType(colType uint8, cell string) error {
 	case TypeFloat64:
 		_, err = strconv.ParseFloat(cell, 64)
 	case TypeDate:
-		err = nil
+		// stored as unix timestamp (int64)
+		_, err = strconv.ParseInt(cell, 10, 64)
 	case TypeBool:
 		_, err = strconv.ParseBool(cell)
 	case TypeNumeric:
@@ -229,6 +241,9 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 	if head.ColumnCount == 0 {
 		return Table{}, errors.New("No valid columns")
 	}
+	if colTypes != nil && len(colTypes) != int(head.ColumnCount) {
+		return Table{}, fmt.Errorf("colTypes length (%d) does not match column count (%d)", len(colTypes), head.ColumnCount)
+	}
 	head.RowCount = 0
 	head.Columns = make([]ColumnMeta, head.ColumnCount)
 	columnTypes := make([]TypeTracker, head.ColumnCount)
@@ -244,6 +259,9 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		head.Columns[i].Name = col
 
 		// length
+		if len(col) > 255 {
+			return Table{}, fmt.Errorf("column name %q exceeds 255-byte limit", col)
+		}
 		head.Columns[i].Length = uint8(len(col))
 
 		// type
@@ -286,7 +304,9 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 				}
 			}
 			// always update flags so the tracker stays accurate even for passed types
-			columnTypes[i].UpdateFlags(col)
+			if err := columnTypes[i].UpdateFlags(col); err != nil {
+				return Table{}, fmt.Errorf("column %q: %w", head.Columns[i].Name, err)
+			}
 		}
 	}
 
