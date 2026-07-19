@@ -24,6 +24,9 @@ func WriteHeader(header Header, filename string) error {
 		return err
 	}
 
+	// Row count
+	err = binary.Write(file, binary.LittleEndian, header.Rows)
+
 	// Column Loop
 	for _, col := range header.Columns {
 		err = binary.Write(file, binary.LittleEndian, col.Offset)
@@ -44,9 +47,6 @@ func WriteHeader(header Header, filename string) error {
 			return err
 		}
 	}
-
-	// Row count
-	err = binary.Write(file, binary.LittleEndian, header.Rows)
 
 	return nil
 }

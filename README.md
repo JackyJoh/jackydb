@@ -13,14 +13,13 @@ A read-only columnar storage engine and SQL query executor, written in Go.
 ```
 magic      : 5
 col_count  : 2
+row_count  : 8
 --------------------
 offset     : 8
 type       : 1
 name_len   : 1
 name       : name_len
 (repeat per column)
---------------------
-row_count  : 8
 --------------------
 data       : raw column bytes
 ```

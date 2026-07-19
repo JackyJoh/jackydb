@@ -1,10 +1,15 @@
 package main
 
+type Table struct {
+	File string
+	Head Header
+}
+
 type Header struct {
 	Magic       [5]byte
 	ColumnCount uint16
-	Columns     []ColumnMeta
 	Rows        uint64
+	Columns     []ColumnMeta
 }
 
 type ColumnMeta struct {
