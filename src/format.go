@@ -8,7 +8,7 @@ type Table struct {
 type Header struct {
 	Magic       [5]byte
 	ColumnCount uint16
-	Rows        uint64
+	RowCount    uint64
 	Columns     []ColumnMeta
 }
 
