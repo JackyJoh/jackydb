@@ -49,8 +49,8 @@ func ReadHeader(filename string) (Header, error) {
 		if err != nil {
 			return Header{}, err
 		}
-		var nullBitmapOff uint64
-		err = binary.Read(file, binary.LittleEndian, &nullBitmapOff)
+		var hasNulls bool
+		err = binary.Read(file, binary.LittleEndian, &hasNulls)
 		if err != nil {
 			return Header{}, err
 		}
@@ -70,11 +70,11 @@ func ReadHeader(filename string) (Header, error) {
 			return Header{}, err
 		}
 		tempCol := ColumnMeta{
-			Offset:           colOff,
-			NullBitmapOffset: nullBitmapOff,
-			Type:             colType,
-			Length:           colLength,
-			Name:             string(colName),
+			Offset:   colOff,
+			HasNulls: hasNulls,
+			Type:     colType,
+			Length:   colLength,
+			Name:     string(colName),
 		}
 		colMeta = append(colMeta, tempCol)
 	}

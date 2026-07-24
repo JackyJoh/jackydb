@@ -165,7 +165,7 @@ func WriteHeader(header Header, filename string) error {
 		if err != nil {
 			return err
 		}
-		err = binary.Write(file, binary.LittleEndian, col.NullBitmapOffset)
+		err = binary.Write(file, binary.LittleEndian, col.HasNulls)
 		if err != nil {
 			return err
 		}
@@ -354,15 +354,13 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 	for _, col := range head.Columns {
 		totalNameLength += int(col.Length)
 	}
-	offset := 5 + 1 + 2 + 8 + totalNameLength + (18 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
+	offset := 5 + 1 + 2 + 8 + totalNameLength + (11 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
 	for i := range head.Columns {
 		// bitmap (if any) goes immediately before this column's data
-		if columnTypes[i].hasNulls {
+		head.Columns[i].HasNulls = columnTypes[i].hasNulls
+		if head.Columns[i].HasNulls {
 			bitmapSize := int((head.RowCount + 7) / 8) // ceil(RowCount / 8)
-			head.Columns[i].NullBitmapOffset = uint64(offset)
 			offset += bitmapSize
-		} else {
-			head.Columns[i].NullBitmapOffset = 0
 		}
 		head.Columns[i].Offset = uint64(offset)
 		offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)

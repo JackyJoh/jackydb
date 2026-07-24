@@ -20,11 +20,18 @@ type Header struct {
 }
 
 type ColumnMeta struct {
-	Offset           uint64
-	NullBitmapOffset uint64 // 0 if the column has no nulls
-	Type             uint8
-	Length           uint8
-	Name             string
+	Offset   uint64
+	HasNulls bool
+	Type     uint8
+	Length   uint8
+	Name     string
+}
+
+// NullBitmapOffset returns where this column's null bitmap starts, derived
+// from Offset and the table's row count (the bitmap always sits immediately
+// before the column's data). Only meaningful when HasNulls is true.
+func (c ColumnMeta) NullBitmapOffset(rowCount uint64) uint64 {
+	return c.Offset - (rowCount+7)/8
 }
 
 var MagicConst [5]byte = [5]byte{'j', 'a', 'c', 'k', 'y'}
