@@ -17,11 +17,12 @@ col_count  : 2
 row_count  : 8
 --------------------
 offset      : 8
-null_bitmap : 8   (0 if the column has no nulls)
+has_nulls   : 1
 type        : 1
 name_len    : 1
 name        : name_len
 (repeat per column)
 --------------------
 per column: [null bitmap (if any)][raw column data]
+null bitmap offset = offset - ceil(row_count / 8), when has_nulls
 ```
