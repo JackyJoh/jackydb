@@ -131,8 +131,12 @@ func WriteHeader(header Header, filename string) error {
 	}
 	defer file.Close()
 
-	// Write Magic and ColumnCount
+	// Write Magic, Version, and ColumnCount
 	err = binary.Write(file, binary.LittleEndian, header.Magic)
+	if err != nil {
+		return err
+	}
+	err = binary.Write(file, binary.LittleEndian, header.Version)
 	if err != nil {
 		return err
 	}
@@ -247,6 +251,7 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		return table, err // if first row is empty, file is invalid
 	}
 	head.Magic = MagicConst
+	head.Version = CurrentVersion
 	head.ColumnCount = uint16(len(row))
 	if head.ColumnCount == 0 {
 		return Table{}, errors.New("No valid columns")
@@ -333,7 +338,7 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 	for _, col := range head.Columns {
 		totalNameLength += int(col.Length)
 	}
-	offset := 5 + 2 + 8 + totalNameLength + (10 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
+	offset := 5 + 1 + 2 + 8 + totalNameLength + (10 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
 	for i := range head.Columns {
 		head.Columns[i].Offset = uint64(offset)
 		offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)

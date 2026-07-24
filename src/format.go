@@ -13,6 +13,7 @@ type Table struct {
 
 type Header struct {
 	Magic       [5]byte
+	Version     uint8
 	ColumnCount uint16
 	RowCount    uint64
 	Columns     []ColumnMeta
@@ -28,6 +29,9 @@ type ColumnMeta struct {
 var MagicConst [5]byte = [5]byte{'j', 'a', 'c', 'k', 'y'}
 var MaxInt32Size = 0x7FFFFFFF
 var MaxUint32Size = 0xFFFFFFFF
+
+// current format version as of today
+const CurrentVersion uint8 = 1
 
 // Type Helpers
 const (

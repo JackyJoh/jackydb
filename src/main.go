@@ -5,7 +5,7 @@ import "fmt"
 func main() {
 
 	var testFile = "../testfile.jdb"
-	testHeader := Header{Magic: [5]byte{'j', 'a', 'c', 'k', 'y'}, ColumnCount: 0x02, RowCount: 0x00,
+	testHeader := Header{Magic: [5]byte{'j', 'a', 'c', 'k', 'y'}, Version: CurrentVersion, ColumnCount: 0x02, RowCount: 0x00,
 		Columns: []ColumnMeta{
 			{Offset: 0, Type: 0x01, Length: 8, Name: "order_id"},
 			{Offset: 4, Type: 0x07, Length: 10, Name: "customer"},

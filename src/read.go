@@ -20,6 +20,13 @@ func ReadHeader(filename string) (Header, error) {
 		return Header{}, err
 	}
 
+	// version
+	var version uint8
+	err = binary.Read(file, binary.LittleEndian, &version)
+	if err != nil {
+		return Header{}, err
+	}
+
 	// colCount
 	var colCount uint16
 	err = binary.Read(file, binary.LittleEndian, &colCount)
@@ -68,6 +75,7 @@ func ReadHeader(filename string) (Header, error) {
 
 	head := Header{
 		Magic:       mag,
+		Version:     version,
 		ColumnCount: colCount,
 		RowCount:    rowCount,
 		Columns:     colMeta,

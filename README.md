@@ -12,6 +12,7 @@ A read-only columnar storage engine and SQL query executor, written in Go.
 
 ```
 magic      : 5
+version    : 1
 col_count  : 2
 row_count  : 8
 --------------------
