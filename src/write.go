@@ -18,6 +18,7 @@ type TypeTracker struct {
 	maxVal     uint64 // use isOnlyPos for signs
 	isBoolVals bool
 	maxCellLen uint8 // largest cell byte length seen; used to size varchar(N) fallback
+	hasNulls   bool  // true once an empty cell has been seen for this column
 }
 
 // Flags start "on" (true) and get flipped "off" (false) as violating cells are seen
@@ -29,6 +30,7 @@ func NewTypeTracker() TypeTracker {
 		maxVal:     0,
 		isBoolVals: true,
 		maxCellLen: 0,
+		hasNulls:   false,
 	}
 }
 
@@ -37,6 +39,12 @@ func NewTypeTracker() TypeTracker {
 // Returns an error if the cell can't be represented at all (exceeds the
 // 255-byte varchar ceiling of the format).
 func (t *TypeTracker) UpdateFlags(cell string) error {
+	// empty cell = null; doesn't count as evidence for or against any type
+	if cell == "" {
+		t.hasNulls = true
+		return nil
+	}
+
 	// numeric check (covers int/uint/float)
 	if t.isNumeric {
 		f, err := strconv.ParseFloat(cell, 64)
@@ -157,6 +165,10 @@ func WriteHeader(header Header, filename string) error {
 		if err != nil {
 			return err
 		}
+		err = binary.Write(file, binary.LittleEndian, col.NullBitmapOffset)
+		if err != nil {
+			return err
+		}
 		err = binary.Write(file, binary.LittleEndian, col.Type)
 		if err != nil {
 			return err
@@ -177,6 +189,10 @@ func WriteHeader(header Header, filename string) error {
 
 // TestType returns nil if a cell is successfully converted
 func TestType(colType uint8, cell string) error {
+	if cell == "" {
+		return nil // empty cell = null; always valid regardless of declared type
+	}
+
 	if IsVarchar(colType) {
 		if len(cell) > int(VarcharMaxLen(colType)) {
 			return errors.New("cell exceeds varchar max length")
@@ -338,8 +354,16 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 	for _, col := range head.Columns {
 		totalNameLength += int(col.Length)
 	}
-	offset := 5 + 1 + 2 + 8 + totalNameLength + (10 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
+	offset := 5 + 1 + 2 + 8 + totalNameLength + (18 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
 	for i := range head.Columns {
+		// bitmap (if any) goes immediately before this column's data
+		if columnTypes[i].hasNulls {
+			bitmapSize := int((head.RowCount + 7) / 8) // ceil(RowCount / 8)
+			head.Columns[i].NullBitmapOffset = uint64(offset)
+			offset += bitmapSize
+		} else {
+			head.Columns[i].NullBitmapOffset = 0
+		}
 		head.Columns[i].Offset = uint64(offset)
 		offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)
 	}

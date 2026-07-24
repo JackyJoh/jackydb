@@ -20,10 +20,11 @@ type Header struct {
 }
 
 type ColumnMeta struct {
-	Offset uint64
-	Type   uint8
-	Length uint8
-	Name   string
+	Offset           uint64
+	NullBitmapOffset uint64 // 0 if the column has no nulls
+	Type             uint8
+	Length           uint8
+	Name             string
 }
 
 var MagicConst [5]byte = [5]byte{'j', 'a', 'c', 'k', 'y'}
