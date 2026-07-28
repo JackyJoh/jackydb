@@ -429,7 +429,7 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 			// get byte count for this column's type
 			byteCount := ByteSizeForType(head.Columns[colIdx].Type)
 
-			// get data offset for this column and row
+			// get data offset for this column AND row
 			dataOffset := head.Columns[colIdx].Offset + uint64(rowIdx)*uint64(byteCount) // base offset + row offset
 
 			// if nulls, set the bit in the bitmap and skip writing data
@@ -454,9 +454,8 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 				if err != nil {
 					return Table{}, err
 				}
-			} else {
+			} else { // else write the data for this cell
 
-				// else write the data for this cell
 				// convert to the correct type and write it to the file at the correct offset
 				dataBytes, err := EncodeCell(head.Columns[colIdx].Type, col)
 				if err != nil {

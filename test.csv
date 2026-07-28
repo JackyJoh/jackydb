@@ -1,3 +1,4 @@
-X,Y
-"hello",1.0
-"world",2.0
+STRING_TEST,INT_TEST,DEC_TEST
+"hello",1,4.0
+"world",2,-5.0
+"",3,
