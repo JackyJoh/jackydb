@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -78,6 +82,34 @@ func NewVarcharType(maxLen uint8) uint8 {
 	return maxLen
 }
 
+// TypeToString returns a human-readable name for a type tag, e.g. "int32"
+// or "varchar(50)".
+func TypeToString(t uint8) string {
+	if IsVarchar(t) {
+		return fmt.Sprintf("varchar(%d)", VarcharMaxLen(t))
+	}
+	switch t {
+	case TypeInt32:
+		return "int32"
+	case TypeInt64:
+		return "int64"
+	case TypeUint32:
+		return "uint32"
+	case TypeUint64:
+		return "uint64"
+	case TypeFloat64:
+		return "float64"
+	case TypeBool:
+		return "bool"
+	case TypeDate:
+		return "date"
+	case TypeNumeric:
+		return "numeric"
+	default:
+		return "unknown"
+	}
+}
+
 var stringToType = map[string]uint8{
 	"int32":   TypeInt32,
 	"int64":   TypeInt64,
@@ -87,6 +119,71 @@ var stringToType = map[string]uint8{
 	"bool":    TypeBool,
 	"date":    TypeDate,
 	"numeric": TypeNumeric,
+	"varchar": TypeVarcharDefault,
+}
+
+// EncodeCell parses a cell's string value per colType and returns its
+// fixed-width on-disk bytes. Never called for null cells; those are handled
+// separately via the null bitmap.
+func EncodeCell(colType uint8, cell string) ([]byte, error) {
+	if IsVarchar(colType) {
+		buf := make([]byte, VarcharMaxLen(colType))
+		copy(buf, cell) // length already validated <= VarcharMaxLen by TestType
+		return buf, nil
+	}
+
+	buf := make([]byte, ByteSizeForType(colType))
+	switch colType {
+	case TypeInt32:
+		v, err := strconv.ParseInt(cell, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint32(buf, uint32(v))
+	case TypeInt64:
+		v, err := strconv.ParseInt(cell, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint64(buf, uint64(v))
+	case TypeUint32:
+		v, err := strconv.ParseUint(cell, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint32(buf, uint32(v))
+	case TypeUint64:
+		v, err := strconv.ParseUint(cell, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint64(buf, v)
+	case TypeFloat64, TypeNumeric:
+		v, err := strconv.ParseFloat(cell, 64)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint64(buf, math.Float64bits(v))
+	case TypeDate:
+		// stored as unix timestamp (int64)
+		v, err := strconv.ParseInt(cell, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint64(buf, uint64(v))
+	case TypeBool:
+		v, err := strconv.ParseBool(cell)
+		if err != nil {
+			return nil, err
+		}
+		if v {
+			buf[0] = 1
+		}
+	default:
+		return nil, errors.New("Passed type is invalid")
+	}
+
+	return buf, nil
 }
 
 // ParseVarcharType parses "varchar(N)" or "varcharN" into a sized varchar

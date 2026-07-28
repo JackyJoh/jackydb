@@ -4,30 +4,28 @@ import "fmt"
 
 func main() {
 
-	var testFile = "../testfile.jdb"
-	testHeader := Header{Magic: [5]byte{'j', 'a', 'c', 'k', 'y'}, Version: CurrentVersion, ColumnCount: 0x02, RowCount: 0x00,
-		Columns: []ColumnMeta{
-			{Offset: 0, Type: 0x01, Length: 8, Name: "order_id"},
-			{Offset: 4, Type: 0x07, Length: 10, Name: "customer"},
-		},
-	}
+	testFile := "../test.csv"
 
-	err := WriteHeader(testHeader, testFile)
+	// convert the CSV into a .jdb file, inferring column types automatically
+	table, err := WriteCSV(testFile, "", nil)
 	if err != nil {
 		fmt.Println("error:", err)
+		return
 	}
 
-	readHeader, err := ReadHeader(testFile)
+	// read the header back from the .jdb file WriteCSV just produced
+	readHeader, err := ReadHeader(table.File)
 	if err != nil {
 		fmt.Println("error:", err)
+		return
 	}
 
-	fmt.Printf("Written Magic: %s | Read Magic: %s\n", testHeader.Magic, readHeader.Magic)
-	fmt.Printf("Written ColumnCount: %d | Read ColumnCount: %d\n", testHeader.ColumnCount, readHeader.ColumnCount)
-	fmt.Printf("Written RowCount: %d | Read RowCount: %d\n", testHeader.RowCount, readHeader.RowCount)
+	fmt.Printf("Magic: %s | Version: %d | ColumnCount: %d | RowCount: %d\n",
+		readHeader.Magic, readHeader.Version, readHeader.ColumnCount, readHeader.RowCount)
 
+	// print each column's resolved metadata
 	for i, col := range readHeader.Columns {
-		fmt.Printf("Read Column %d: Offset=%d Type=%d Length=%d Name=%s\n",
-			i, col.Offset, col.Type, col.Length, col.Name)
+		fmt.Printf("Column %d: Offset=%d HasNulls=%t Type=%s Length=%d Name=%s\n",
+			i, col.Offset, col.HasNulls, TypeToString(col.Type), col.Length, col.Name)
 	}
 }

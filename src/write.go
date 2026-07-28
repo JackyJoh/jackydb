@@ -129,18 +129,11 @@ func (t *TypeTracker) ResolveType() uint8 {
 	return NewVarcharType(t.maxCellLen)
 }
 
-// WriteHeader writes header's fields to filename in the .jdb binary format.
-func WriteHeader(header Header, filename string) error {
-
-	// Open file
-	file, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+// WriteHeader writes header's fields to file in the .jdb binary format.
+func WriteHeader(header Header, file *os.File) error {
 
 	// Write Magic, Version, and ColumnCount
-	err = binary.Write(file, binary.LittleEndian, header.Magic)
+	err := binary.Write(file, binary.LittleEndian, header.Magic)
 	if err != nil {
 		return err
 	}
@@ -325,8 +318,14 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		}
 		head.RowCount++
 
+		// error if row has more cols than header
+		if len(row) != int(head.ColumnCount) {
+			return Table{}, fmt.Errorf("row contains more columns than header: %q", row)
+		}
+
 		// per row scans (going left to right; horizontal)
 		for i, col := range row {
+
 			// type handling
 			if isTypePassed[i] {
 				err = TestType(head.Columns[i].Type, col)
@@ -367,12 +366,112 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 	}
 	// -------------------------------------------------------------
 
-	// SECOND PASS
-	// -------------------------------------------------------------
-
-	// -------------------------------------------------------------
+	// create jdb file and point table at file
+	if jdbFilename == "" {
+		jdbFilename = strings.TrimSuffix(csvFilename, ".csv") + ".jdb"
+	}
+	jdbFile, err := os.Create(jdbFilename)
+	if err != nil {
+		return Table{}, err
+	}
+	defer jdbFile.Close()
 
 	table.Head = head
+	table.File = jdbFilename
+
+	// write header to jdb
+	err = WriteHeader(head, jdbFile)
+	if err != nil {
+		return Table{}, err
+	}
+
+	// pre-allocate the rest of the file (bitmaps + column data) so later
+	// ReadAt calls on not-yet-written bitmap bytes don't hit io.EOF
+	err = jdbFile.Truncate(int64(offset))
+	if err != nil {
+		return Table{}, err
+	}
+
+	// SECOND PASS
+	// -------------------------------------------------------------
+	// stream rows into jdb file
+	file.Seek(0, io.SeekStart)
+	reader = csv.NewReader(file)
+
+	// skip header row
+	_, err = reader.Read()
+	if err != nil {
+		return Table{}, err
+	}
+
+	// row loop
+	for rowIdx := 0; ; rowIdx++ {
+		row, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return Table{}, err
+		}
+		if rowIdx >= int(head.RowCount) {
+			break // extra rows are ignored
+		}
+
+		// column loop
+		for colIdx, col := range row {
+
+			// get null bitmap offset for this column (if any)
+			var bitmapOffset uint64
+			if head.Columns[colIdx].HasNulls {
+				bitmapOffset = head.Columns[colIdx].NullBitmapOffset(head.RowCount)
+			}
+
+			// get byte count for this column's type
+			byteCount := ByteSizeForType(head.Columns[colIdx].Type)
+
+			// get data offset for this column and row
+			dataOffset := head.Columns[colIdx].Offset + uint64(rowIdx)*uint64(byteCount) // base offset + row offset
+
+			// if nulls, set the bit in the bitmap and skip writing data
+			if col == "" && head.Columns[colIdx].HasNulls {
+				byteIdx := rowIdx / 8
+				bitIdx := rowIdx % 8
+				// read the byte, set the bit, write it back
+				b := make([]byte, 1)
+				_, err = jdbFile.ReadAt(b, int64(bitmapOffset+uint64(byteIdx))) // read the byte at the bitmap offset
+				if err != nil {
+					return Table{}, err
+				}
+				b[0] |= 1 << bitIdx                                              // set the bit for this row
+				_, err = jdbFile.WriteAt(b, int64(bitmapOffset+uint64(byteIdx))) // write the byte back
+				if err != nil {
+					return Table{}, err
+				}
+
+				// write empyte byte(s) for this cell
+				emptyBytes := make([]byte, byteCount)
+				_, err = jdbFile.WriteAt(emptyBytes, int64(dataOffset))
+				if err != nil {
+					return Table{}, err
+				}
+			} else {
+
+				// else write the data for this cell
+				// convert to the correct type and write it to the file at the correct offset
+				dataBytes, err := EncodeCell(head.Columns[colIdx].Type, col)
+				if err != nil {
+					return Table{}, err
+				}
+				_, err = jdbFile.WriteAt(dataBytes, int64(dataOffset))
+				if err != nil {
+					return Table{}, err
+				}
+			}
+		}
+	}
+
+	// -------------------------------------------------------------
+
 	return table, nil
 
 }
