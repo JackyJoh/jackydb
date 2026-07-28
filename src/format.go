@@ -41,21 +41,28 @@ func (c ColumnMeta) NullBitmapOffset(rowCount uint64) uint64 {
 var MagicConst [5]byte = [5]byte{'j', 'a', 'c', 'k', 'y'}
 var MaxInt32Size = 0x7FFFFFFF
 var MaxUint32Size = 0xFFFFFFFF
+var MaxInt8Size = 0x7F
+var MaxInt16Size = 0x7FFF
+var MaxUint8Size = 0xFF
+var MaxUint16Size = 0xFFFF
 
 // current format version as of today
-const CurrentVersion uint8 = 1
+const CurrentVersion uint8 = 3
 
 // Type Helpers
 const (
-	TypeInt32   uint8 = 0x01
-	TypeInt64   uint8 = 0x02
-	TypeUint32  uint8 = 0x03
-	TypeUint64  uint8 = 0x04
-	TypeFloat64 uint8 = 0x05
-	TypeBool    uint8 = 0x06
-	// 0x07 retired (was TypeString; varchar supersedes it)
-	TypeDate    uint8 = 0x08
-	TypeNumeric uint8 = 0x09
+	TypeInt8    uint8 = 0x01
+	TypeInt16   uint8 = 0x02
+	TypeInt32   uint8 = 0x03
+	TypeInt64   uint8 = 0x04
+	TypeUint8   uint8 = 0x05
+	TypeUint16  uint8 = 0x06
+	TypeUint32  uint8 = 0x07
+	TypeUint64  uint8 = 0x08
+	TypeFloat64 uint8 = 0x09
+	TypeBool    uint8 = 0x0A
+	TypeDate    uint8 = 0x0B
+	TypeNumeric uint8 = 0x0C
 )
 
 // anything bigger than TypeNumeric = varchar(N), N is just the byte value itself
@@ -89,10 +96,18 @@ func TypeToString(t uint8) string {
 		return fmt.Sprintf("varchar(%d)", VarcharMaxLen(t))
 	}
 	switch t {
+	case TypeInt8:
+		return "int8"
+	case TypeInt16:
+		return "int16"
 	case TypeInt32:
 		return "int32"
 	case TypeInt64:
 		return "int64"
+	case TypeUint8:
+		return "uint8"
+	case TypeUint16:
+		return "uint16"
 	case TypeUint32:
 		return "uint32"
 	case TypeUint64:
@@ -111,8 +126,12 @@ func TypeToString(t uint8) string {
 }
 
 var stringToType = map[string]uint8{
+	"int8":    TypeInt8,
+	"int16":   TypeInt16,
 	"int32":   TypeInt32,
 	"int64":   TypeInt64,
+	"uint8":   TypeUint8,
+	"uint16":  TypeUint16,
 	"uint32":  TypeUint32,
 	"uint64":  TypeUint64,
 	"float64": TypeFloat64,
@@ -134,6 +153,18 @@ func EncodeCell(colType uint8, cell string) ([]byte, error) {
 
 	buf := make([]byte, ByteSizeForType(colType))
 	switch colType {
+	case TypeInt8:
+		v, err := strconv.ParseInt(cell, 10, 8)
+		if err != nil {
+			return nil, err
+		}
+		buf[0] = uint8(v)
+	case TypeInt16:
+		v, err := strconv.ParseInt(cell, 10, 16)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint16(buf, uint16(v))
 	case TypeInt32:
 		v, err := strconv.ParseInt(cell, 10, 32)
 		if err != nil {
@@ -146,6 +177,18 @@ func EncodeCell(colType uint8, cell string) ([]byte, error) {
 			return nil, err
 		}
 		binary.LittleEndian.PutUint64(buf, uint64(v))
+	case TypeUint8:
+		v, err := strconv.ParseUint(cell, 10, 8)
+		if err != nil {
+			return nil, err
+		}
+		buf[0] = uint8(v)
+	case TypeUint16:
+		v, err := strconv.ParseUint(cell, 10, 16)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint16(buf, uint16(v))
 	case TypeUint32:
 		v, err := strconv.ParseUint(cell, 10, 32)
 		if err != nil {
@@ -201,8 +244,12 @@ func ParseVarcharType(s string) (uint8, bool) {
 
 // returns how many bytes each size takes up
 var typeToByteSize = map[uint8]int{
+	TypeInt8:    1,
+	TypeInt16:   2,
 	TypeInt32:   4,
 	TypeInt64:   8,
+	TypeUint8:   1,
+	TypeUint16:  2,
 	TypeUint32:  4,
 	TypeUint64:  8,
 	TypeFloat64: 8,

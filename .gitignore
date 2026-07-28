@@ -1,1 +1,5 @@
 *.exe
+*.csv
+*.jdb
+!test.csv
+!test.jdb

@@ -111,12 +111,24 @@ func (t *TypeTracker) ResolveType() uint8 {
 		}
 
 		if t.isOnlyPos {
+			if t.maxVal <= uint64(MaxUint8Size) {
+				return TypeUint8
+			}
+			if t.maxVal <= uint64(MaxUint16Size) {
+				return TypeUint16
+			}
 			if t.maxVal <= uint64(MaxUint32Size) {
 				return TypeUint32
 			}
 			return TypeUint64
 
 		} else {
+			if t.maxVal <= uint64(MaxInt8Size) {
+				return TypeInt8
+			}
+			if t.maxVal <= uint64(MaxInt16Size) {
+				return TypeInt16
+			}
 			if t.maxVal <= uint64(MaxInt32Size) {
 				return TypeInt32
 			}
@@ -195,10 +207,18 @@ func TestType(colType uint8, cell string) error {
 
 	var err error
 	switch colType {
+	case TypeInt8:
+		_, err = strconv.ParseInt(cell, 10, 8)
+	case TypeInt16:
+		_, err = strconv.ParseInt(cell, 10, 16)
 	case TypeInt32:
 		_, err = strconv.ParseInt(cell, 10, 32)
 	case TypeInt64:
 		_, err = strconv.ParseInt(cell, 10, 64)
+	case TypeUint8:
+		_, err = strconv.ParseUint(cell, 10, 8)
+	case TypeUint16:
+		_, err = strconv.ParseUint(cell, 10, 16)
 	case TypeUint32:
 		_, err = strconv.ParseUint(cell, 10, 32)
 	case TypeUint64:
@@ -226,13 +246,13 @@ func TestType(colType uint8, cell string) error {
 // (".csv" replaced with ".jdb"). Otherwise the given jdbFilename is used.
 //
 // colTypes optionally specifies the type of each column, in column order,
-// using string names ("int32", "int64", "uint32", "uint64", "float64",
-// "bool", "date", "numeric"), or a sized varchar via "varchar(N)" /
-// "varcharN" (1-255; N<=9 collides with the type enum and silently
-// becomes varchar(32), see NewVarcharType). If colTypes is nil, column
-// types are inferred automatically from the CSV data. If a given
-// colTypes value fails to parse for any row in a column, that column
-// falls back to varchar.
+// using string names ("int8", "int16", "int32", "int64", "uint8", "uint16",
+// "uint32", "uint64", "float64", "bool", "date", "numeric"), or a sized
+// varchar via "varchar(N)" / "varcharN" (1-255; N<=TypeNumeric collides
+// with the type enum and silently becomes varchar(32), see NewVarcharType).
+// If colTypes is nil, column types are inferred automatically from the CSV
+// data. If a given colTypes value fails to parse for any row in a column,
+// that column falls back to varchar.
 //
 // WriteCSV performs two passes over the CSV: the first determines row
 // count, resolves column types, and computes column byte offsets; the

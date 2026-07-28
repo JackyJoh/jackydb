@@ -1,0 +1,9 @@
+Before int8, int16, uint8, and uint16 support: 92368 bytes  (63850 bytes csv for comparison)
+After int8, int16, uint8, and uint16 support: 40386 bytes
+Bytes saved: 51982 ~ 56.3% less
+~37% more compressed than csv
+__________________________________________
+
+Before float32 support: 40386 bytes (63850 bytes csv for comparison)
+After float32 support: X bytes
+Bytes saved: XXXXXXX ~X% less
