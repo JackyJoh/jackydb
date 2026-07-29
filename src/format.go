@@ -46,8 +46,8 @@ var MaxInt16Size = 0x7FFF
 var MaxUint8Size = 0xFF
 var MaxUint16Size = 0xFFFF
 
-// current format version as of today
-const CurrentVersion uint8 = 3
+// current format version; held at 1 until MVP
+const CurrentVersion uint8 = 1
 
 // Type Helpers
 const (
@@ -59,16 +59,17 @@ const (
 	TypeUint16  uint8 = 0x06
 	TypeUint32  uint8 = 0x07
 	TypeUint64  uint8 = 0x08
-	TypeFloat64 uint8 = 0x09
-	TypeBool    uint8 = 0x0A
-	TypeDate    uint8 = 0x0B
-	TypeNumeric uint8 = 0x0C
+	TypeFloat32 uint8 = 0x09
+	TypeFloat64 uint8 = 0x0A
+	TypeBool    uint8 = 0x0B
+	TypeDate    uint8 = 0x0C
+	TypeNumeric uint8 = 0x0D
 )
 
 // anything bigger than TypeNumeric = varchar(N), N is just the byte value itself
 const (
-	TypeVarcharMin     uint8 = TypeNumeric + 1 // 0x0A
-	TypeVarcharDefault uint8 = 32              // varchar(32)
+	TypeVarcharMin     uint8 = TypeNumeric + 1 // smallest representable varchar length
+	TypeVarcharDefault uint8 = TypeVarcharMin  // fallback for maxLen <= TypeNumeric; smallest legal value
 )
 
 // is it a varchar?
@@ -81,7 +82,7 @@ func VarcharMaxLen(t uint8) uint8 {
 	return t
 }
 
-// makes a varchar(N) type byte, defaults to 32 if maxLen too small
+// makes a varchar(N) type byte, defaults to TypeVarcharMin if maxLen too small
 func NewVarcharType(maxLen uint8) uint8 {
 	if maxLen <= TypeNumeric {
 		return TypeVarcharDefault
@@ -112,6 +113,8 @@ func TypeToString(t uint8) string {
 		return "uint32"
 	case TypeUint64:
 		return "uint64"
+	case TypeFloat32:
+		return "float32"
 	case TypeFloat64:
 		return "float64"
 	case TypeBool:
@@ -134,6 +137,7 @@ var stringToType = map[string]uint8{
 	"uint16":  TypeUint16,
 	"uint32":  TypeUint32,
 	"uint64":  TypeUint64,
+	"float32": TypeFloat32,
 	"float64": TypeFloat64,
 	"bool":    TypeBool,
 	"date":    TypeDate,
@@ -201,6 +205,12 @@ func EncodeCell(colType uint8, cell string) ([]byte, error) {
 			return nil, err
 		}
 		binary.LittleEndian.PutUint64(buf, v)
+	case TypeFloat32:
+		v, err := strconv.ParseFloat(cell, 32)
+		if err != nil {
+			return nil, err
+		}
+		binary.LittleEndian.PutUint32(buf, math.Float32bits(float32(v)))
 	case TypeFloat64, TypeNumeric:
 		v, err := strconv.ParseFloat(cell, 64)
 		if err != nil {
@@ -252,6 +262,7 @@ var typeToByteSize = map[uint8]int{
 	TypeUint16:  2,
 	TypeUint32:  4,
 	TypeUint64:  8,
+	TypeFloat32: 4,
 	TypeFloat64: 8,
 	TypeBool:    1,
 	TypeDate:    8, // stored as unix timestamp (int64)

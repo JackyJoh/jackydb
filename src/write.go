@@ -12,25 +12,27 @@ import (
 )
 
 type TypeTracker struct {
-	isNumeric  bool
-	isDecimal  bool
-	isOnlyPos  bool
-	maxVal     uint64 // use isOnlyPos for signs
-	isBoolVals bool
-	maxCellLen uint8 // largest cell byte length seen; used to size varchar(N) fallback
-	hasNulls   bool  // true once an empty cell has been seen for this column
+	isNumeric     bool
+	isDecimal     bool
+	isFloat32Safe bool // true if every decimal cell so far round-trips exactly through float32
+	isOnlyPos     bool
+	maxVal        uint64 // use isOnlyPos for signs
+	isBoolVals    bool
+	maxCellLen    uint8 // largest cell byte length seen; used to size varchar(N) fallback
+	hasNulls      bool  // true once an empty cell has been seen for this column
 }
 
 // Flags start "on" (true) and get flipped "off" (false) as violating cells are seen
 func NewTypeTracker() TypeTracker {
 	return TypeTracker{
-		isNumeric:  true,
-		isDecimal:  false,
-		isOnlyPos:  true,
-		maxVal:     0,
-		isBoolVals: true,
-		maxCellLen: 0,
-		hasNulls:   false,
+		isNumeric:     true,
+		isDecimal:     false,
+		isFloat32Safe: true,
+		isOnlyPos:     true,
+		maxVal:        0,
+		isBoolVals:    true,
+		maxCellLen:    0,
+		hasNulls:      false,
 	}
 }
 
@@ -57,6 +59,16 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 			// maxVal must come from an exact integer parse, not  float64
 			if strings.ContainsAny(cell, ".eE") {
 				t.isDecimal = true
+				// float32-safe only if the value still prints the same when
+				// rounded to float32 precision; (float32 and float64
+				// round "1.8" to different bit patterns even though both
+				// still mean 1.8)
+				if t.isFloat32Safe {
+					f32, err32 := strconv.ParseFloat(cell, 32)
+					if err32 != nil || strconv.FormatFloat(f32, 'g', -1, 32) != strconv.FormatFloat(f, 'g', -1, 64) { // round-trip check
+						t.isFloat32Safe = false
+					}
+				}
 			} else if u, err := strconv.ParseUint(cell, 10, 64); err == nil {
 				if u > t.maxVal {
 					t.maxVal = u
@@ -107,6 +119,9 @@ func (t *TypeTracker) ResolveType() uint8 {
 	if t.isNumeric {
 
 		if t.isDecimal {
+			if t.isFloat32Safe {
+				return TypeFloat32
+			}
 			return TypeFloat64
 		}
 
@@ -223,6 +238,8 @@ func TestType(colType uint8, cell string) error {
 		_, err = strconv.ParseUint(cell, 10, 32)
 	case TypeUint64:
 		_, err = strconv.ParseUint(cell, 10, 64)
+	case TypeFloat32:
+		_, err = strconv.ParseFloat(cell, 32)
 	case TypeFloat64:
 		_, err = strconv.ParseFloat(cell, 64)
 	case TypeDate:
@@ -247,9 +264,10 @@ func TestType(colType uint8, cell string) error {
 //
 // colTypes optionally specifies the type of each column, in column order,
 // using string names ("int8", "int16", "int32", "int64", "uint8", "uint16",
-// "uint32", "uint64", "float64", "bool", "date", "numeric"), or a sized
-// varchar via "varchar(N)" / "varcharN" (1-255; N<=TypeNumeric collides
-// with the type enum and silently becomes varchar(32), see NewVarcharType).
+// "uint32", "uint64", "float32", "float64", "bool", "date", "numeric"), or
+// a sized varchar via "varchar(N)" / "varcharN" (1-255; N<=TypeNumeric
+// collides with the type enum and silently becomes varchar(32), see
+// NewVarcharType).
 // If colTypes is nil, column types are inferred automatically from the CSV
 // data. If a given colTypes value fails to parse for any row in a column,
 // that column falls back to varchar.
