@@ -3,10 +3,8 @@ package main
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"math"
 	"strconv"
-	"strings"
 )
 
 // Database layout & layering
@@ -50,52 +48,32 @@ var MaxUint16Size = 0xFFFF
 const CurrentVersion uint8 = 1
 
 // Type Helpers
+// Values descend from the top of the byte range (like a stack downward)
+// so future types can claim the low end, including any that
+// want to encode a small parameter directly in the type byte itself.
 const (
-	TypeInt8    uint8 = 0x01
-	TypeInt16   uint8 = 0x02
-	TypeInt32   uint8 = 0x03
-	TypeInt64   uint8 = 0x04
-	TypeUint8   uint8 = 0x05
-	TypeUint16  uint8 = 0x06
-	TypeUint32  uint8 = 0x07
-	TypeUint64  uint8 = 0x08
-	TypeFloat32 uint8 = 0x09
-	TypeFloat64 uint8 = 0x0A
-	TypeBool    uint8 = 0x0B
-	TypeDate    uint8 = 0x0C
-	TypeNumeric uint8 = 0x0D
+	TypeInt8    uint8 = 0xFF
+	TypeInt16   uint8 = 0xFE
+	TypeInt32   uint8 = 0xFD
+	TypeInt64   uint8 = 0xFC
+	TypeUint8   uint8 = 0xFB
+	TypeUint16  uint8 = 0xFA
+	TypeUint32  uint8 = 0xF9
+	TypeUint64  uint8 = 0xF8
+	TypeFloat32 uint8 = 0xF7
+	TypeFloat64 uint8 = 0xF6
+	TypeBool    uint8 = 0xF5
+	TypeDate    uint8 = 0xF4
+	TypeNumeric uint8 = 0xF3
+	// TypeString marks a dynamic string column (blob + offsets array).
+	// A single dedicated tag, not a range trick like the old fixed-width
+	// varchar(N)-via-type-byte scheme; downstream write/read code checks
+	// against this value to know when to build the offsets array/entrySize.
+	TypeString uint8 = 0xF2
 )
 
-// anything bigger than TypeNumeric = varchar(N), N is just the byte value itself
-const (
-	TypeVarcharMin     uint8 = TypeNumeric + 1 // smallest representable varchar length
-	TypeVarcharDefault uint8 = TypeVarcharMin  // fallback for maxLen <= TypeNumeric; smallest legal value
-)
-
-// is it a varchar?
-func IsVarchar(t uint8) bool {
-	return t > TypeNumeric
-}
-
-// the type byte IS the max length
-func VarcharMaxLen(t uint8) uint8 {
-	return t
-}
-
-// makes a varchar(N) type byte, defaults to TypeVarcharMin if maxLen too small
-func NewVarcharType(maxLen uint8) uint8 {
-	if maxLen <= TypeNumeric {
-		return TypeVarcharDefault
-	}
-	return maxLen
-}
-
-// TypeToString returns a human-readable name for a type tag, e.g. "int32"
-// or "varchar(50)".
+// TypeToString returns a human-readable name for a type tag, e.g. "int32".
 func TypeToString(t uint8) string {
-	if IsVarchar(t) {
-		return fmt.Sprintf("varchar(%d)", VarcharMaxLen(t))
-	}
 	switch t {
 	case TypeInt8:
 		return "int8"
@@ -123,6 +101,8 @@ func TypeToString(t uint8) string {
 		return "date"
 	case TypeNumeric:
 		return "numeric"
+	case TypeString:
+		return "string"
 	default:
 		return "unknown"
 	}
@@ -142,17 +122,15 @@ var stringToType = map[string]uint8{
 	"bool":    TypeBool,
 	"date":    TypeDate,
 	"numeric": TypeNumeric,
-	"varchar": TypeVarcharDefault,
+	"string":  TypeString,
 }
 
 // EncodeCell parses a cell's string value per colType and returns its
 // fixed-width on-disk bytes. Never called for null cells; those are handled
 // separately via the null bitmap.
 func EncodeCell(colType uint8, cell string) ([]byte, error) {
-	if IsVarchar(colType) {
-		buf := make([]byte, VarcharMaxLen(colType))
-		copy(buf, cell) // length already validated <= VarcharMaxLen by TestType
-		return buf, nil
+	if colType == TypeString {
+		return nil, errors.New("TypeString encoding not yet implemented")
 	}
 
 	buf := make([]byte, ByteSizeForType(colType))
@@ -239,19 +217,6 @@ func EncodeCell(colType uint8, cell string) ([]byte, error) {
 	return buf, nil
 }
 
-// ParseVarcharType parses "varchar(N)" or "varcharN" into a sized varchar
-// type tag via NewVarcharType. Returns ok=false if s isn't a varchar form.
-func ParseVarcharType(s string) (uint8, bool) {
-	if !strings.HasPrefix(s, "varchar") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.Trim(strings.TrimPrefix(s, "varchar"), "()"))
-	if err != nil || n <= 0 || n > 255 {
-		return 0, false
-	}
-	return NewVarcharType(uint8(n)), true
-}
-
 // returns how many bytes each size takes up
 var typeToByteSize = map[uint8]int{
 	TypeInt8:    1,
@@ -269,10 +234,8 @@ var typeToByteSize = map[uint8]int{
 	TypeNumeric: 8, // stored as float64
 }
 
-// gets byte size for a type, handles varchar too
+// gets byte size for a type; not meaningful for TypeString, which is
+// variable-width (blob + offsets array) and handled separately
 func ByteSizeForType(t uint8) int {
-	if IsVarchar(t) {
-		return int(VarcharMaxLen(t))
-	}
 	return typeToByteSize[t]
 }

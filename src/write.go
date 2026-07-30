@@ -18,7 +18,7 @@ type TypeTracker struct {
 	isOnlyPos     bool
 	maxVal        uint64 // use isOnlyPos for signs
 	isBoolVals    bool
-	maxCellLen    uint8 // largest cell byte length seen; used to size varchar(N) fallback
+	maxCellLen    uint8 // largest cell byte length seen; kept for future TypeString support
 	hasNulls      bool  // true once an empty cell has been seen for this column
 }
 
@@ -39,7 +39,7 @@ func NewTypeTracker() TypeTracker {
 // UpdateFlags inspects a single cell for a column and flips tracker flags off
 // flags only move one-way (true -> false); flags cannot be re-enabled.
 // Returns an error if the cell can't be represented at all (exceeds the
-// 255-byte varchar ceiling of the format).
+// 255-byte cap of the maxCellLen tracker field).
 func (t *TypeTracker) UpdateFlags(cell string) error {
 	// empty cell = null; doesn't count as evidence for or against any type
 	if cell == "" {
@@ -96,13 +96,13 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 		}
 	}
 
-	// track largest cell length in case this column falls back to varchar(N).
+	// track largest cell length in case this column falls back to TypeString.
 	// only fatal once the column can no longer resolve to a fixed-width type
 	// (numeric/bool store the parsed value, not the cell's raw bytes, so their
 	// length doesn't matter).
 	cellLen := len(cell)
 	if !t.isNumeric && !t.isBoolVals && cellLen > 255 {
-		return errors.New("cell exceeds 255-byte varchar limit")
+		return errors.New("cell exceeds 255-byte tracked length limit")
 	}
 	if cellLen > 255 {
 		cellLen = 255
@@ -114,7 +114,8 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 	return nil
 }
 
-// picks a type based on the flags; falls back to a minimal varchar(N) instead of plain string
+// picks a type based on the flags; falls back to TypeString if the column
+// is neither numeric nor bool
 func (t *TypeTracker) ResolveType() uint8 {
 	if t.isNumeric {
 
@@ -153,7 +154,7 @@ func (t *TypeTracker) ResolveType() uint8 {
 		return TypeBool
 	}
 
-	return NewVarcharType(t.maxCellLen)
+	return TypeString
 }
 
 // WriteHeader writes header's fields to file in the .jdb binary format.
@@ -213,11 +214,8 @@ func TestType(colType uint8, cell string) error {
 		return nil // empty cell = null; always valid regardless of declared type
 	}
 
-	if IsVarchar(colType) {
-		if len(cell) > int(VarcharMaxLen(colType)) {
-			return errors.New("cell exceeds varchar max length")
-		}
-		return nil
+	if colType == TypeString {
+		return errors.New("TypeString encoding not yet implemented")
 	}
 
 	var err error
@@ -264,19 +262,17 @@ func TestType(colType uint8, cell string) error {
 //
 // colTypes optionally specifies the type of each column, in column order,
 // using string names ("int8", "int16", "int32", "int64", "uint8", "uint16",
-// "uint32", "uint64", "float32", "float64", "bool", "date", "numeric"), or
-// a sized varchar via "varchar(N)" / "varcharN" (1-255; N<=TypeNumeric
-// collides with the type enum and silently becomes varchar(32), see
-// NewVarcharType).
+// "uint32", "uint64", "float32", "float64", "bool", "date", "numeric",
+// "string"). Note TypeString isn't encodable yet (see EncodeCell/TestType).
 // If colTypes is nil, column types are inferred automatically from the CSV
 // data. If a given colTypes value fails to parse for any row in a column,
-// that column falls back to varchar.
+// that column falls back to TypeString.
 //
 // WriteCSV performs two passes over the CSV: the first determines row
 // count, resolves column types, and computes column byte offsets; the
 // second streams rows into the .jdb file's data section.
 //
-// It returns the resulting Header on success, or an error if the CSV
+// It returns the resulting Table on success, or an error if the CSV
 // could not be read or the .jdb file could not be written.
 func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table, error) {
 
@@ -329,9 +325,6 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		// type
 		if colTypes != nil {
 			tag, ok := stringToType[colTypes[i]]
-			if !ok {
-				tag, ok = ParseVarcharType(colTypes[i])
-			}
 			if !ok {
 				isTypePassed[i] = false
 			} else {
