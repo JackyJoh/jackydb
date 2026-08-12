@@ -239,3 +239,19 @@ var typeToByteSize = map[uint8]int{
 func ByteSizeForType(t uint8) int {
 	return typeToByteSize[t]
 }
+
+// EntrySizeForBlobLen returns the minimum byte width (1, 2, 4, or 8) needed
+// to hold an offset up to blobLen: how wide each entry in a TypeString
+// column's offset map needs to be.
+func EntrySizeForBlobLen(blobLen uint64) uint8 {
+	switch {
+	case blobLen <= uint64(MaxUint8Size):
+		return 1
+	case blobLen <= uint64(MaxUint16Size):
+		return 2
+	case blobLen <= uint64(MaxUint32Size):
+		return 4
+	default:
+		return 8
+	}
+}

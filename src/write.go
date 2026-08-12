@@ -18,8 +18,10 @@ type TypeTracker struct {
 	isOnlyPos     bool
 	maxVal        uint64 // use isOnlyPos for signs
 	isBoolVals    bool
-	maxCellLen    uint8 // largest cell byte length seen; kept for future TypeString support
-	hasNulls      bool  // true once an empty cell has been seen for this column
+	maxCellLen    uint8  // largest cell byte length seen; kept for future TypeString support
+	hasNulls      bool   // true once an empty cell has been seen for this column
+	bytesSeen     uint64 // tracks the amount of bytes the data blob consumes
+	// 						 used for entrySize calc if TypeString
 }
 
 // Flags start "on" (true) and get flipped "off" (false) as violating cells are seen
@@ -100,6 +102,7 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 	// only fatal once the column can no longer resolve to a fixed-width type
 	// (numeric/bool store the parsed value, not the cell's raw bytes, so their
 	// length doesn't matter).
+	t.bytesSeen += uint64(len(cell))
 	cellLen := len(cell)
 	if !t.isNumeric && !t.isBoolVals && cellLen > 255 {
 		return errors.New("cell exceeds 255-byte tracked length limit")
@@ -393,7 +396,14 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 			offset += bitmapSize
 		}
 		head.Columns[i].Offset = uint64(offset)
-		offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)
+		if head.Columns[i].Type == TypeString {
+			// [1 byte entry-size marker][offset map: (RowCount+1) entries][string blob]
+			entrySize := EntrySizeForBlobLen(columnTypes[i].bytesSeen)
+			offsetMapSize := uint64(entrySize) * (head.RowCount + 1)
+			offset += 1 + int(offsetMapSize) + int(columnTypes[i].bytesSeen)
+		} else {
+			offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)
+		}
 	}
 	// -------------------------------------------------------------
 
