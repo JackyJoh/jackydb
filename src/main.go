@@ -4,7 +4,7 @@ import "fmt"
 
 func main() {
 
-	testFile := "../test.csv"
+	testFile := "../test2.csv"
 
 	// convert the CSV into a .jdb file, inferring column types automatically
 	table, err := WriteCSV(testFile, "", nil)

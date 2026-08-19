@@ -257,6 +257,53 @@ func TestType(colType uint8, cell string) error {
 	return err
 }
 
+// writeBitmap sets the null bit for rowIdx in the bitmap starting at
+// bitmapOffset. One bit per row, so no type parameter is needed.
+func writeBitmap(file *os.File, bitmapOffset uint64, rowIdx int) error {
+	byteIdx := rowIdx / 8
+	bitIdx := rowIdx % 8
+
+	b := make([]byte, 1)
+	if _, err := file.ReadAt(b, int64(bitmapOffset+uint64(byteIdx))); err != nil {
+		return err
+	}
+	b[0] |= 1 << bitIdx
+	_, err := file.WriteAt(b, int64(bitmapOffset+uint64(byteIdx)))
+	return err
+}
+
+// writeGeneric writes a single fixed-width cell: every type with no extra
+// pre-offset structure (ints, uints, floats, bool, date), and decimal until
+// its own precision/scale-aware writer exists.
+func writeGeneric(file *os.File, col ColumnMeta, rowIdx int, cell string) error {
+	byteCount := ByteSizeForType(col.Type)
+	dataOffset := col.Offset + uint64(rowIdx)*uint64(byteCount)
+
+	if cell == "" && col.HasNulls {
+		_, err := file.WriteAt(make([]byte, byteCount), int64(dataOffset))
+		return err
+	}
+
+	dataBytes, err := EncodeCell(col.Type, cell)
+	if err != nil {
+		return err
+	}
+	_, err = file.WriteAt(dataBytes, int64(dataOffset))
+	return err
+}
+
+// writeString is a shell; TypeString row writes (offset map + blob) aren't
+// implemented yet.
+func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string) error {
+	return errors.New("writeString not yet implemented")
+}
+
+// writeDecimal is a shell; until precision/scale-aware encoding exists,
+// decimal columns write exactly like writeGeneric.
+func writeDecimal(file *os.File, col ColumnMeta, rowIdx int, cell string) error {
+	return writeGeneric(file, col, rowIdx, cell)
+}
+
 // WriteCSV reads a CSV file at csvFilename and converts it into a JackyDB
 // binary columnar (.jdb) file.
 //
@@ -395,13 +442,19 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 			bitmapSize := int((head.RowCount + 7) / 8) // ceil(RowCount / 8)
 			offset += bitmapSize
 		}
-		head.Columns[i].Offset = uint64(offset)
 		if head.Columns[i].Type == TypeString {
-			// [1 byte entry-size marker][offset map: (RowCount+1) entries][string blob]
+			// [null bitmap][offset map: (RowCount+1) entries][entrySize marker, 1 byte][string blob]
+			// Offset always points at the blob start; the marker and offset
+			// map are derived backwards from Offset (see StringEntrySizeOffset /
+			// StringOffsetMapOffset), the same way NullBitmapOffset derives
+			// backwards from Offset for fixed-width columns.
 			entrySize := EntrySizeForBlobLen(columnTypes[i].bytesSeen)
 			offsetMapSize := uint64(entrySize) * (head.RowCount + 1)
-			offset += 1 + int(offsetMapSize) + int(columnTypes[i].bytesSeen)
+			offset += int(offsetMapSize) + 1
+			head.Columns[i].Offset = uint64(offset)
+			offset += int(columnTypes[i].bytesSeen)
 		} else {
+			head.Columns[i].Offset = uint64(offset)
 			offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)
 		}
 	}
@@ -460,52 +513,25 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 
 		// column loop
 		for colIdx, col := range row {
+			colMeta := head.Columns[colIdx]
 
-			// get null bitmap offset for this column (if any)
-			var bitmapOffset uint64
-			if head.Columns[colIdx].HasNulls {
-				bitmapOffset = head.Columns[colIdx].NullBitmapOffset(head.RowCount)
+			// if null, set the bit in the bitmap; the dispatched writer below
+			// still handles skipping/zero-filling its own data for this cell
+			if col == "" && colMeta.HasNulls {
+				bitmapOffset := colMeta.NullBitmapOffset(head.RowCount)
+				if err := writeBitmap(jdbFile, bitmapOffset, rowIdx); err != nil {
+					return Table{}, err
+				}
 			}
 
-			// get byte count for this column's type
-			byteCount := ByteSizeForType(head.Columns[colIdx].Type)
-
-			// get data offset for this column AND row
-			dataOffset := head.Columns[colIdx].Offset + uint64(rowIdx)*uint64(byteCount) // base offset + row offset
-
-			// if nulls, set the bit in the bitmap and skip writing data
-			if col == "" && head.Columns[colIdx].HasNulls {
-				byteIdx := rowIdx / 8
-				bitIdx := rowIdx % 8
-				// read the byte, set the bit, write it back
-				b := make([]byte, 1)
-				_, err = jdbFile.ReadAt(b, int64(bitmapOffset+uint64(byteIdx))) // read the byte at the bitmap offset
-				if err != nil {
-					return Table{}, err
-				}
-				b[0] |= 1 << bitIdx                                              // set the bit for this row
-				_, err = jdbFile.WriteAt(b, int64(bitmapOffset+uint64(byteIdx))) // write the byte back
-				if err != nil {
-					return Table{}, err
-				}
-
-				// write empyte byte(s) for this cell
-				emptyBytes := make([]byte, byteCount)
-				_, err = jdbFile.WriteAt(emptyBytes, int64(dataOffset))
-				if err != nil {
-					return Table{}, err
-				}
-			} else { // else write the data for this cell
-
-				// convert to the correct type and write it to the file at the correct offset
-				dataBytes, err := EncodeCell(head.Columns[colIdx].Type, col)
-				if err != nil {
-					return Table{}, err
-				}
-				_, err = jdbFile.WriteAt(dataBytes, int64(dataOffset))
-				if err != nil {
-					return Table{}, err
-				}
+			switch colMeta.Type {
+			case TypeString:
+				err = writeString(jdbFile, colMeta, rowIdx, col)
+			default:
+				err = writeGeneric(jdbFile, colMeta, rowIdx, col)
+			}
+			if err != nil {
+				return Table{}, err
 			}
 		}
 	}
