@@ -36,6 +36,27 @@ func (c ColumnMeta) NullBitmapOffset(rowCount uint64) uint64 {
 	return c.Offset - (rowCount+7)/8
 }
 
+// StringEntrySizeOffset returns where this column's 1-byte entrySize marker
+// is stored, derived from Offset (the marker always sits immediately before
+// the blob). Only meaningful when Type == TypeString.
+func (c ColumnMeta) StringEntrySizeOffset() uint64 {
+	return c.Offset - 1
+}
+
+// StringOffsetMapOffset returns where this column's offset map starts,
+// derived from the entrySize marker position and rowCount. Only meaningful
+// when Type == TypeString.
+func (c ColumnMeta) StringOffsetMapOffset(rowCount uint64, entrySize uint8) uint64 {
+	return c.StringEntrySizeOffset() - uint64(entrySize)*(rowCount+1)
+}
+
+// StringNullBitmapOffset returns where a TypeString column's null bitmap
+// starts - immediately before the offset map, not immediately before Offset
+// like NullBitmapOffset. Only meaningful when HasNulls is true.
+func (c ColumnMeta) StringNullBitmapOffset(rowCount uint64, entrySize uint8) uint64 {
+	return c.StringOffsetMapOffset(rowCount, entrySize) - (rowCount+7)/8
+}
+
 var MagicConst [5]byte = [5]byte{'j', 'a', 'c', 'k', 'y'}
 var MaxInt32Size = 0x7FFFFFFF
 var MaxUint32Size = 0xFFFFFFFF

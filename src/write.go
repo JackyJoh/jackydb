@@ -292,10 +292,71 @@ func writeGeneric(file *os.File, col ColumnMeta, rowIdx int, cell string) error 
 	return err
 }
 
-// writeString is a shell; TypeString row writes (offset map + blob) aren't
-// implemented yet.
-func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string) error {
-	return errors.New("writeString not yet implemented")
+// encodeOffsetEntry returns v as a little-endian byte slice of the given
+// entrySize width (1, 2, 4, or 8 bytes), matching EntrySizeForBlobLen.
+func encodeOffsetEntry(v uint64, entrySize uint8) []byte {
+	buf := make([]byte, entrySize)
+	switch entrySize {
+	case 1:
+		buf[0] = uint8(v)
+	case 2:
+		binary.LittleEndian.PutUint16(buf, uint16(v))
+	case 4:
+		binary.LittleEndian.PutUint32(buf, uint32(v))
+	case 8:
+		binary.LittleEndian.PutUint64(buf, v)
+	}
+	return buf
+}
+
+// decodeOffsetEntry reads a little-endian offset-map entry of the given
+// entrySize width (1, 2, 4, or 8 bytes) back into a uint64.
+func decodeOffsetEntry(b []byte, entrySize uint8) uint64 {
+	switch entrySize {
+	case 1:
+		return uint64(b[0])
+	case 2:
+		return uint64(binary.LittleEndian.Uint16(b))
+	case 4:
+		return uint64(binary.LittleEndian.Uint32(b))
+	default:
+		return binary.LittleEndian.Uint64(b)
+	}
+}
+
+// writeString writes a single TypeString cell: it reads the row's starting
+// blob offset back from the offset map (already on disk from the previous
+// row's write, or zero-filled by Truncate for row 0), writes the cell's
+// bytes into the blob at that position, then advances the offset map by
+// len(cell) for the next row to read. The entrySize marker itself is
+// written once per column before the row loop starts, not here.
+func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string, entrySize uint8, rowCount uint64) error {
+	offsetMapStart := col.StringOffsetMapOffset(rowCount, entrySize)
+
+	// read the previous row's starting offset
+	prevBytes := make([]byte, entrySize)
+	if _, err := file.ReadAt(prevBytes, int64(offsetMapStart+uint64(rowIdx)*uint64(entrySize))); err != nil {
+		return err
+	}
+	prevOffset := decodeOffsetEntry(prevBytes, entrySize)
+
+	// write the cell's bytes into the blob at the previous row's offset
+	// update the next row's offset to be the previous offset + len(cell)
+	nextOffset := prevOffset
+	if cell == "" && col.HasNulls {
+		// null cell: offsetMap[rowIdx+1] = offsetMap[rowIdx] + 0, no blob bytes written
+	} else {
+		blobPos := col.Offset + prevOffset
+		if _, err := file.WriteAt([]byte(cell), int64(blobPos)); err != nil {
+			return err
+		}
+		nextOffset += uint64(len(cell))
+	}
+
+	// write the next row's starting offset into the offset map
+	nextEntryOffset := offsetMapStart + uint64(rowIdx+1)*uint64(entrySize)
+	_, err := file.WriteAt(encodeOffsetEntry(nextOffset, entrySize), int64(nextEntryOffset))
+	return err
 }
 
 // writeDecimal is a shell; until precision/scale-aware encoding exists,
@@ -435,6 +496,10 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		totalNameLength += int(col.Length)
 	}
 	offset := 5 + 1 + 2 + 8 + totalNameLength + (11 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
+	// entrySize per column; only meaningful where Type == TypeString. Computed
+	// once here (from bytesSeen, already known from the first pass) so the
+	// second pass never needs to recompute or re-derive it.
+	entrySizes := make([]uint8, head.ColumnCount)
 	for i := range head.Columns {
 		// bitmap (if any) goes immediately before this column's data
 		head.Columns[i].HasNulls = columnTypes[i].hasNulls
@@ -448,8 +513,8 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 			// map are derived backwards from Offset (see StringEntrySizeOffset /
 			// StringOffsetMapOffset), the same way NullBitmapOffset derives
 			// backwards from Offset for fixed-width columns.
-			entrySize := EntrySizeForBlobLen(columnTypes[i].bytesSeen)
-			offsetMapSize := uint64(entrySize) * (head.RowCount + 1)
+			entrySizes[i] = EntrySizeForBlobLen(columnTypes[i].bytesSeen)
+			offsetMapSize := uint64(entrySizes[i]) * (head.RowCount + 1)
 			offset += int(offsetMapSize) + 1
 			head.Columns[i].Offset = uint64(offset)
 			offset += int(columnTypes[i].bytesSeen)
@@ -498,6 +563,19 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		return Table{}, err
 	}
 
+	// write each string column's entrySize marker once, up front - its static
+	// per column so it never needs to be touched again during the row loop
+	for i := range head.Columns {
+		if head.Columns[i].Type != TypeString {
+			continue
+		}
+		markerOffset := head.Columns[i].StringEntrySizeOffset()
+		_, err = jdbFile.WriteAt([]byte{entrySizes[i]}, int64(markerOffset))
+		if err != nil {
+			return Table{}, err
+		}
+	}
+
 	// row loop
 	for rowIdx := 0; ; rowIdx++ {
 		row, err := reader.Read()
@@ -516,9 +594,16 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 			colMeta := head.Columns[colIdx]
 
 			// if null, set the bit in the bitmap; the dispatched writer below
-			// still handles skipping/zero-filling its own data for this cell
+			// still handles skipping/zero-filling its own data for this cell.
+			// TypeString's bitmap sits before the offset map + marker, not
+			// immediately before Offset, so it needs its own derivation.
 			if col == "" && colMeta.HasNulls {
-				bitmapOffset := colMeta.NullBitmapOffset(head.RowCount)
+				var bitmapOffset uint64
+				if colMeta.Type == TypeString {
+					bitmapOffset = colMeta.StringNullBitmapOffset(head.RowCount, entrySizes[colIdx])
+				} else {
+					bitmapOffset = colMeta.NullBitmapOffset(head.RowCount)
+				}
 				if err := writeBitmap(jdbFile, bitmapOffset, rowIdx); err != nil {
 					return Table{}, err
 				}
@@ -526,7 +611,7 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 
 			switch colMeta.Type {
 			case TypeString:
-				err = writeString(jdbFile, colMeta, rowIdx, col)
+				err = writeString(jdbFile, colMeta, rowIdx, col, entrySizes[colIdx], head.RowCount)
 			default:
 				err = writeGeneric(jdbFile, colMeta, rowIdx, col)
 			}

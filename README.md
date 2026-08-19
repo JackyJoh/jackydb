@@ -23,6 +23,10 @@ name_len    : 1
 name        : name_len
 (repeat per column)
 --------------------
-per column: [null bitmap (if any)][raw column data]
-null bitmap offset = offset - ceil(row_count / 8), when has_nulls
+per column, fixed-width types: [null bitmap (if any)][raw column data]
+per column, TypeString:        [null bitmap (if any)][offset map][entrySize marker][blob]
+
+"offset" always points at the start of the last bracket (raw data / blob).
+everything before it is derived backwards from "offset", using row_count
+and (for TypeString) entrySize.
 ```
