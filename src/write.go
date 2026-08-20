@@ -19,7 +19,6 @@ type TypeTracker struct {
 	isOnlyPos     bool
 	maxVal        uint64 // use isOnlyPos for signs
 	isBoolVals    bool
-	maxCellLen    uint8  // largest cell byte length seen; kept for TypeString support
 	maxIntDigits  uint8  // largest digit count seen before '.' (or whole cell if no '.'); precision = maxIntDigits + maxScale
 	maxScale      uint8  // largest count of digits after '.' seen; used for TypeDecimal scale
 	hasNulls      bool   // true once an empty cell has been seen for this column
@@ -37,7 +36,6 @@ func NewTypeTracker() TypeTracker {
 		isOnlyPos:     true,
 		maxVal:        0,
 		isBoolVals:    true,
-		maxCellLen:    0,
 		maxIntDigits:  0,
 		maxScale:      0,
 		hasNulls:      false,
@@ -133,21 +131,7 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 		}
 	}
 
-	// track largest cell length in case this column falls back to TypeString.
-	// only fatal once the column can no longer resolve to a fixed-width type
-	// (numeric/bool store the parsed value, not the cell's raw bytes, so their
-	// length doesn't matter).
 	t.bytesSeen += uint64(len(cell))
-	cellLen := len(cell)
-	if !t.isNumeric && !t.isBoolVals && cellLen > 255 {
-		return errors.New("cell exceeds 255-byte tracked length limit")
-	}
-	if cellLen > 255 {
-		cellLen = 255
-	}
-	if uint8(cellLen) > t.maxCellLen {
-		t.maxCellLen = uint8(cellLen)
-	}
 
 	return nil
 }
