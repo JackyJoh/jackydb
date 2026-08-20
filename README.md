@@ -25,6 +25,7 @@ name        : name_len
 --------------------
 per column, fixed-width types: [null bitmap (if any)][raw column data]
 per column, TypeString:        [null bitmap (if any)][offset map][entrySize marker][blob]
+per column, decimal:           [null bitmap (if any)][preciscion][scale][blob]
 
 "offset" always points at the start of the last bracket (raw data / blob).
 everything before it is derived backwards from "offset", using row_count

@@ -43,6 +43,20 @@ func (c ColumnMeta) StringEntrySizeOffset() uint64 {
 	return c.Offset - 1
 }
 
+// DecimalPrecisionOffset returns where this column's 1-byte precision marker
+// is stored, derived from Offset (the marker always sits immediately before
+// the blob). Only meaningful when Type == TypeDecimal.
+func (c ColumnMeta) DecimalPrecisionOffset() uint64 {
+	return c.Offset - 2
+}
+
+// DecimalScaleOffset returns where this column's 1-byte scale marker
+// is stored, derived from Offset (the marker always sits immediately before
+// the blob). Only meaningful when Type == TypeDecimal.
+func (c ColumnMeta) DecimalScaleOffset() uint64 {
+	return c.Offset - 1
+}
+
 // StringOffsetMapOffset returns where this column's offset map starts,
 // derived from the entrySize marker position and rowCount. Only meaningful
 // when Type == TypeString.
@@ -64,6 +78,7 @@ var MaxInt8Size = 0x7F
 var MaxInt16Size = 0x7FFF
 var MaxUint8Size = 0xFF
 var MaxUint16Size = 0xFFFF
+var MaxDecimalPrecision uint8 = 18 // int64 cap; beyond this needs int128, which is deferred
 
 // current format version; held at 1 until MVP
 const CurrentVersion uint8 = 1
@@ -85,7 +100,10 @@ const (
 	TypeFloat64 uint8 = 0xF6
 	TypeBool    uint8 = 0xF5
 	TypeDate    uint8 = 0xF4
-	TypeNumeric uint8 = 0xF3
+	// TypeDecimal marks a fixed-point numeric column (precision + scale,
+	// mirrors SQL NUMERIC). Byte width is derived from precision, not
+	// stored directly - same idea as entrySize for TypeString.
+	TypeDecimal uint8 = 0xF3
 	// TypeString marks a dynamic string column (blob + offsets array).
 	// A single dedicated tag, not a range trick like the old fixed-width
 	// varchar(N)-via-type-byte scheme; downstream write/read code checks
@@ -120,8 +138,8 @@ func TypeToString(t uint8) string {
 		return "bool"
 	case TypeDate:
 		return "date"
-	case TypeNumeric:
-		return "numeric"
+	case TypeDecimal:
+		return "decimal"
 	case TypeString:
 		return "string"
 	default:
@@ -142,7 +160,7 @@ var stringToType = map[string]uint8{
 	"float64": TypeFloat64,
 	"bool":    TypeBool,
 	"date":    TypeDate,
-	"numeric": TypeNumeric,
+	"decimal": TypeDecimal,
 	"string":  TypeString,
 }
 
@@ -150,8 +168,8 @@ var stringToType = map[string]uint8{
 // fixed-width on-disk bytes. Never called for null cells; those are handled
 // separately via the null bitmap.
 func EncodeCell(colType uint8, cell string) ([]byte, error) {
-	if colType == TypeString {
-		return nil, errors.New("TypeString encoding not yet implemented")
+	if colType == TypeDecimal {
+		return nil, errors.New("TypeDecimal encoding not yet implemented")
 	}
 
 	buf := make([]byte, ByteSizeForType(colType))
@@ -210,7 +228,7 @@ func EncodeCell(colType uint8, cell string) ([]byte, error) {
 			return nil, err
 		}
 		binary.LittleEndian.PutUint32(buf, math.Float32bits(float32(v)))
-	case TypeFloat64, TypeNumeric:
+	case TypeFloat64:
 		v, err := strconv.ParseFloat(cell, 64)
 		if err != nil {
 			return nil, err
@@ -252,7 +270,6 @@ var typeToByteSize = map[uint8]int{
 	TypeFloat64: 8,
 	TypeBool:    1,
 	TypeDate:    8, // stored as unix timestamp (int64)
-	TypeNumeric: 8, // stored as float64
 }
 
 // gets byte size for a type; not meaningful for TypeString, which is
