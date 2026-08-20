@@ -346,29 +346,23 @@ func decodeOffsetEntry(b []byte, entrySize uint8) uint64 {
 	}
 }
 
-// writeString writes a single TypeString cell: it reads the row's starting
-// blob offset back from the offset map (already on disk from the previous
-// row's write, or zero-filled by Truncate for row 0), writes the cell's
-// bytes into the blob at that position, then advances the offset map by
-// len(cell) for the next row to read. The entrySize marker itself is
-// written once per column before the row loop starts, not here.
-func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string, entrySize uint8, rowCount uint64) error {
+// writeString writes a single TypeString cell: prevOffset points at the
+// caller's running "this column's next blob position" counter (0 for row 0,
+// updated in place after every call), so the row's starting blob offset
+// comes from memory instead of a ReadAt. It writes the cell's bytes into the
+// blob at that position, then advances the offset map by len(cell). The
+// entrySize marker itself is written once per column before the row loop
+// starts, not here.
+func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string, entrySize uint8, rowCount uint64, prevOffset *uint64) error {
 	offsetMapStart := col.StringOffsetMapOffset(rowCount, entrySize)
-
-	// read the previous row's starting offset
-	prevBytes := make([]byte, entrySize)
-	if _, err := file.ReadAt(prevBytes, int64(offsetMapStart+uint64(rowIdx)*uint64(entrySize))); err != nil {
-		return err
-	}
-	prevOffset := decodeOffsetEntry(prevBytes, entrySize)
 
 	// write the cell's bytes into the blob at the previous row's offset
 	// update the next row's offset to be the previous offset + len(cell)
-	nextOffset := prevOffset
+	nextOffset := *prevOffset
 	if cell == "" && col.HasNulls {
 		// null cell: offsetMap[rowIdx+1] = offsetMap[rowIdx] + 0, no blob bytes written
 	} else {
-		blobPos := col.Offset + prevOffset
+		blobPos := col.Offset + *prevOffset
 		if _, err := file.WriteAt([]byte(cell), int64(blobPos)); err != nil {
 			return err
 		}
@@ -377,8 +371,11 @@ func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string, entrySi
 
 	// write the next row's starting offset into the offset map
 	nextEntryOffset := offsetMapStart + uint64(rowIdx+1)*uint64(entrySize)
-	_, err := file.WriteAt(encodeOffsetEntry(nextOffset, entrySize), int64(nextEntryOffset))
-	return err
+	if _, err := file.WriteAt(encodeOffsetEntry(nextOffset, entrySize), int64(nextEntryOffset)); err != nil {
+		return err
+	}
+	*prevOffset = nextOffset
+	return nil
 }
 
 // precisionToByteSize returns the byte width needed to hold a TypeDecimal
@@ -680,6 +677,12 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		}
 	}
 
+	// one running "next blob write position" counter per column, read/updated
+	// in place by writeString instead of ReadAt'ing it back from the offset
+	// map each row; zero value is exactly right for row 0. Only TypeString
+	// columns ever touch their slot.
+	runningOffsets := make([]uint64, head.ColumnCount)
+
 	// row loop
 	for rowIdx := 0; ; rowIdx++ {
 		row, err := reader.Read()
@@ -717,7 +720,7 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 
 			switch colMeta.Type {
 			case TypeString:
-				err = writeString(jdbFile, colMeta, rowIdx, col, entrySizes[colIdx], head.RowCount)
+				err = writeString(jdbFile, colMeta, rowIdx, col, entrySizes[colIdx], head.RowCount, &runningOffsets[colIdx])
 			case TypeDecimal:
 				err = writeDecimal(jdbFile, colMeta, rowIdx, col, columnTypes[colIdx].maxIntDigits+columnTypes[colIdx].maxScale, columnTypes[colIdx].maxScale)
 			default:
