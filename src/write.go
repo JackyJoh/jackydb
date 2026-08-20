@@ -15,11 +15,15 @@ type TypeTracker struct {
 	isNumeric     bool
 	isDecimal     bool
 	isFloat32Safe bool // true if every decimal cell so far round-trips exactly through float32
+	isDecimalSafe bool // true if no cell so far has used scientific notation (e/E)
 	isOnlyPos     bool
 	maxVal        uint64 // use isOnlyPos for signs
 	isBoolVals    bool
-	maxCellLen    uint8 // largest cell byte length seen; used to size varchar(N) fallback
-	hasNulls      bool  // true once an empty cell has been seen for this column
+	maxIntDigits  uint8  // largest digit count seen before '.' (or whole cell if no '.'); precision = maxIntDigits + maxScale
+	maxScale      uint8  // largest count of digits after '.' seen; used for TypeDecimal scale
+	hasNulls      bool   // true once an empty cell has been seen for this column
+	bytesSeen     uint64 // tracks the amount of bytes the data blob consumes
+	// 						 used for entrySize calc if TypeString
 }
 
 // Flags start "on" (true) and get flipped "off" (false) as violating cells are seen
@@ -28,10 +32,12 @@ func NewTypeTracker() TypeTracker {
 		isNumeric:     true,
 		isDecimal:     false,
 		isFloat32Safe: true,
+		isDecimalSafe: true,
 		isOnlyPos:     true,
 		maxVal:        0,
 		isBoolVals:    true,
-		maxCellLen:    0,
+		maxIntDigits:  0,
+		maxScale:      0,
 		hasNulls:      false,
 	}
 }
@@ -39,7 +45,7 @@ func NewTypeTracker() TypeTracker {
 // UpdateFlags inspects a single cell for a column and flips tracker flags off
 // flags only move one-way (true -> false); flags cannot be re-enabled.
 // Returns an error if the cell can't be represented at all (exceeds the
-// 255-byte varchar ceiling of the format).
+// 255-byte cap of the maxCellLen tracker field).
 func (t *TypeTracker) UpdateFlags(cell string) error {
 	// empty cell = null; doesn't count as evidence for or against any type
 	if cell == "" {
@@ -47,7 +53,7 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 		return nil
 	}
 
-	// numeric check (covers int/uint/float)
+	// numeric check (covers int/uint/float/decimal)
 	if t.isNumeric {
 		f, err := strconv.ParseFloat(cell, 64)
 		if err != nil {
@@ -56,9 +62,38 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 			if f < 0 {
 				t.isOnlyPos = false
 			}
+			// track largest digit count before '.' (or the whole cell if no
+			// '.') seen; combined with maxScale this gives TypeDecimal's
+			// needed precision. computed on the int part only - a plain
+			// integer cell like "500" needs its digits counted here even
+			// though some other cell in the column is what sets maxScale,
+			// since "500" still needs padding out to that scale later
+			intPart := cell
+			if dotIdx := strings.Index(cell, "."); dotIdx != -1 {
+				intPart = cell[:dotIdx]
+			}
+			intDigits := uint8(len(intPart)) - uint8(strings.Count(intPart, "-")) - uint8(strings.Count(intPart, "+")) - uint8(strings.Count(intPart, "e")) - uint8(strings.Count(intPart, "E"))
+			if intDigits > t.maxIntDigits {
+				t.maxIntDigits = intDigits
+			}
+
 			// maxVal must come from an exact integer parse, not  float64
 			if strings.ContainsAny(cell, ".eE") {
 				t.isDecimal = true
+				// (e/E) means the digit count we're tracking
+				// no longer reflects real magnitude; decimal can't be
+				// trusted for this column (use float instead)
+				if strings.ContainsAny(cell, "eE") {
+					t.isDecimalSafe = false
+				}
+				// track largest count of digits after '.' seen; used to
+				// determine TypeDecimal scale
+				if dotIdx := strings.Index(cell, "."); dotIdx != -1 {
+					scale := uint8(len(cell) - dotIdx - 1)
+					if scale > t.maxScale {
+						t.maxScale = scale
+					}
+				}
 				// float32-safe only if the value still prints the same when
 				// rounded to float32 precision; (float32 and float64
 				// round "1.8" to different bit patterns even though both
@@ -96,29 +131,23 @@ func (t *TypeTracker) UpdateFlags(cell string) error {
 		}
 	}
 
-	// track largest cell length in case this column falls back to varchar(N).
-	// only fatal once the column can no longer resolve to a fixed-width type
-	// (numeric/bool store the parsed value, not the cell's raw bytes, so their
-	// length doesn't matter).
-	cellLen := len(cell)
-	if !t.isNumeric && !t.isBoolVals && cellLen > 255 {
-		return errors.New("cell exceeds 255-byte varchar limit")
-	}
-	if cellLen > 255 {
-		cellLen = 255
-	}
-	if uint8(cellLen) > t.maxCellLen {
-		t.maxCellLen = uint8(cellLen)
-	}
+	t.bytesSeen += uint64(len(cell))
 
 	return nil
 }
 
-// picks a type based on the flags; falls back to a minimal varchar(N) instead of plain string
+// picks a type based on the flags; falls back to TypeString if the column
+// is neither numeric nor bool
 func (t *TypeTracker) ResolveType() uint8 {
 	if t.isNumeric {
 
 		if t.isDecimal {
+			if t.isDecimalSafe {
+				// precision = int-part digits + scale; check it fits the cap
+				if uint16(t.maxIntDigits)+uint16(t.maxScale) <= uint16(MaxDecimalPrecision) {
+					return TypeDecimal
+				}
+			}
 			if t.isFloat32Safe {
 				return TypeFloat32
 			}
@@ -153,7 +182,7 @@ func (t *TypeTracker) ResolveType() uint8 {
 		return TypeBool
 	}
 
-	return NewVarcharType(t.maxCellLen)
+	return TypeString
 }
 
 // WriteHeader writes header's fields to file in the .jdb binary format.
@@ -213,11 +242,8 @@ func TestType(colType uint8, cell string) error {
 		return nil // empty cell = null; always valid regardless of declared type
 	}
 
-	if IsVarchar(colType) {
-		if len(cell) > int(VarcharMaxLen(colType)) {
-			return errors.New("cell exceeds varchar max length")
-		}
-		return nil
+	if colType == TypeString {
+		return errors.New("TypeString encoding not yet implemented")
 	}
 
 	var err error
@@ -247,12 +273,182 @@ func TestType(colType uint8, cell string) error {
 		_, err = strconv.ParseInt(cell, 10, 64)
 	case TypeBool:
 		_, err = strconv.ParseBool(cell)
-	case TypeNumeric:
-		_, err = strconv.ParseFloat(cell, 64)
 	default:
 		err = errors.New("Passed type is invalid")
 	}
 
+	return err
+}
+
+// writeBitmap sets the null bit for rowIdx in the bitmap starting at
+// bitmapOffset. One bit per row, so no type parameter is needed.
+func writeBitmap(file *os.File, bitmapOffset uint64, rowIdx int) error {
+	byteIdx := rowIdx / 8
+	bitIdx := rowIdx % 8
+
+	b := make([]byte, 1)
+	if _, err := file.ReadAt(b, int64(bitmapOffset+uint64(byteIdx))); err != nil {
+		return err
+	}
+	b[0] |= 1 << bitIdx
+	_, err := file.WriteAt(b, int64(bitmapOffset+uint64(byteIdx)))
+	return err
+}
+
+// writeGeneric writes a single fixed-width cell: every type with no extra
+// pre-offset structure (ints, uints, floats, bool, date)
+func writeGeneric(file *os.File, col ColumnMeta, rowIdx int, cell string) error {
+	byteCount := ByteSizeForType(col.Type)
+	dataOffset := col.Offset + uint64(rowIdx)*uint64(byteCount)
+
+	if cell == "" && col.HasNulls {
+		_, err := file.WriteAt(make([]byte, byteCount), int64(dataOffset))
+		return err
+	}
+
+	dataBytes, err := EncodeCell(col.Type, cell)
+	if err != nil {
+		return err
+	}
+	_, err = file.WriteAt(dataBytes, int64(dataOffset))
+	return err
+}
+
+// encodeOffsetEntry returns v as a little-endian byte slice of the given
+// entrySize width (1, 2, 4, or 8 bytes), matching EntrySizeForBlobLen.
+func encodeOffsetEntry(v uint64, entrySize uint8) []byte {
+	buf := make([]byte, entrySize)
+	switch entrySize {
+	case 1:
+		buf[0] = uint8(v)
+	case 2:
+		binary.LittleEndian.PutUint16(buf, uint16(v))
+	case 4:
+		binary.LittleEndian.PutUint32(buf, uint32(v))
+	case 8:
+		binary.LittleEndian.PutUint64(buf, v)
+	}
+	return buf
+}
+
+// decodeOffsetEntry reads a little-endian offset-map entry of the given
+// entrySize width (1, 2, 4, or 8 bytes) back into a uint64.
+func decodeOffsetEntry(b []byte, entrySize uint8) uint64 {
+	switch entrySize {
+	case 1:
+		return uint64(b[0])
+	case 2:
+		return uint64(binary.LittleEndian.Uint16(b))
+	case 4:
+		return uint64(binary.LittleEndian.Uint32(b))
+	default:
+		return binary.LittleEndian.Uint64(b)
+	}
+}
+
+// writeString writes a single TypeString cell: it reads the row's starting
+// blob offset back from the offset map (already on disk from the previous
+// row's write, or zero-filled by Truncate for row 0), writes the cell's
+// bytes into the blob at that position, then advances the offset map by
+// len(cell) for the next row to read. The entrySize marker itself is
+// written once per column before the row loop starts, not here.
+func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string, entrySize uint8, rowCount uint64) error {
+	offsetMapStart := col.StringOffsetMapOffset(rowCount, entrySize)
+
+	// read the previous row's starting offset
+	prevBytes := make([]byte, entrySize)
+	if _, err := file.ReadAt(prevBytes, int64(offsetMapStart+uint64(rowIdx)*uint64(entrySize))); err != nil {
+		return err
+	}
+	prevOffset := decodeOffsetEntry(prevBytes, entrySize)
+
+	// write the cell's bytes into the blob at the previous row's offset
+	// update the next row's offset to be the previous offset + len(cell)
+	nextOffset := prevOffset
+	if cell == "" && col.HasNulls {
+		// null cell: offsetMap[rowIdx+1] = offsetMap[rowIdx] + 0, no blob bytes written
+	} else {
+		blobPos := col.Offset + prevOffset
+		if _, err := file.WriteAt([]byte(cell), int64(blobPos)); err != nil {
+			return err
+		}
+		nextOffset += uint64(len(cell))
+	}
+
+	// write the next row's starting offset into the offset map
+	nextEntryOffset := offsetMapStart + uint64(rowIdx+1)*uint64(entrySize)
+	_, err := file.WriteAt(encodeOffsetEntry(nextOffset, entrySize), int64(nextEntryOffset))
+	return err
+}
+
+// precisionToByteSize returns the byte width needed to hold a TypeDecimal
+// mantissa of the given precision (digit count), same tiers used in the
+// offset-calc loop: <=2 -> int8, <=4 -> int16, <=9 -> int32, <=18 -> int64.
+func precisionToByteSize(precision uint8) int {
+	switch {
+	case precision <= 2:
+		return 1
+	case precision <= 4:
+		return 2
+	case precision <= 9:
+		return 4
+	default:
+		return 8
+	}
+}
+
+// encodeDecimalMantissa parses a decimal-point-stripped digit string (e.g.
+// "-314" for original cell "-3.14") and encodes it as a little-endian signed
+// integer of the given byte width (1, 2, 4, or 8, from precisionToByteSize).
+func encodeDecimalMantissa(cell string, byteWidth int) ([]byte, error) {
+	v, err := strconv.ParseInt(cell, 10, byteWidth*8)
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, byteWidth)
+	switch byteWidth {
+	case 1:
+		buf[0] = uint8(v)
+	case 2:
+		binary.LittleEndian.PutUint16(buf, uint16(v))
+	case 4:
+		binary.LittleEndian.PutUint32(buf, uint32(v))
+	case 8:
+		binary.LittleEndian.PutUint64(buf, uint64(v))
+	}
+	return buf, nil
+}
+
+// writeDecimal writes a single TypeDecimal cell: pads the fractional digits
+// out to the column's scale, strips the '.', then encodes the resulting
+// digit string as a fixed-width signed integer mantissa.
+func writeDecimal(file *os.File, col ColumnMeta, rowIdx int, cell string, precision uint8, scale uint8) error {
+	byteWidth := precisionToByteSize(precision)
+	dataOffset := col.Offset + uint64(rowIdx)*uint64(byteWidth)
+
+	if cell == "" && col.HasNulls {
+		_, err := file.WriteAt(make([]byte, byteWidth), int64(dataOffset))
+		return err
+	}
+
+	// add padding to meet scale. works for both integer and decimal cells.
+	afterDot := strings.Index(cell, ".")
+	existingScale := 0
+	if afterDot != -1 {
+		existingScale = len(cell) - afterDot - 1
+	}
+	for i := existingScale; i < int(scale); i++ {
+		cell += "0"
+	}
+	// strip cell of '.'
+	cell = strings.ReplaceAll(cell, ".", "")
+
+	// encode and write cell as a little-endian signed integer of the appropriate byte width
+	dataBytes, err := encodeDecimalMantissa(cell, byteWidth)
+	if err != nil {
+		return err
+	}
+	_, err = file.WriteAt(dataBytes, int64(dataOffset))
 	return err
 }
 
@@ -264,19 +460,16 @@ func TestType(colType uint8, cell string) error {
 //
 // colTypes optionally specifies the type of each column, in column order,
 // using string names ("int8", "int16", "int32", "int64", "uint8", "uint16",
-// "uint32", "uint64", "float32", "float64", "bool", "date", "numeric"), or
-// a sized varchar via "varchar(N)" / "varcharN" (1-255; N<=TypeNumeric
-// collides with the type enum and silently becomes varchar(32), see
-// NewVarcharType).
-// If colTypes is nil, column types are inferred automatically from the CSV
-// data. If a given colTypes value fails to parse for any row in a column,
-// that column falls back to varchar.
+// "uint32", "uint64", "float32", "float64", "bool", "date", "numeric",
+// "string"). If colTypes is nil, column types are inferred automatically from
+// the CSV data. If a given colTypes value fails to parse for any row in a
+// column, that column falls back to TypeString.
 //
 // WriteCSV performs two passes over the CSV: the first determines row
 // count, resolves column types, and computes column byte offsets; the
 // second streams rows into the .jdb file's data section.
 //
-// It returns the resulting Header on success, or an error if the CSV
+// It returns the resulting Table on success, or an error if the CSV
 // could not be read or the .jdb file could not be written.
 func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table, error) {
 
@@ -329,9 +522,6 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		// type
 		if colTypes != nil {
 			tag, ok := stringToType[colTypes[i]]
-			if !ok {
-				tag, ok = ParseVarcharType(colTypes[i])
-			}
 			if !ok {
 				isTypePassed[i] = false
 			} else {
@@ -392,6 +582,10 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		totalNameLength += int(col.Length)
 	}
 	offset := 5 + 1 + 2 + 8 + totalNameLength + (11 * int(head.ColumnCount)) // headersize initally; beginning of data bytes
+	// entrySize per column; only meaningful where Type == TypeString. Computed
+	// once here (from bytesSeen, already known from the first pass) so the
+	// second pass never needs to recompute or re-derive it.
+	entrySizes := make([]uint8, head.ColumnCount)
 	for i := range head.Columns {
 		// bitmap (if any) goes immediately before this column's data
 		head.Columns[i].HasNulls = columnTypes[i].hasNulls
@@ -399,8 +593,27 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 			bitmapSize := int((head.RowCount + 7) / 8) // ceil(RowCount / 8)
 			offset += bitmapSize
 		}
-		head.Columns[i].Offset = uint64(offset)
-		offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)
+		if head.Columns[i].Type == TypeString {
+			// [null bitmap][offset map: (RowCount+1) entries][entrySize marker, 1 byte][string blob]
+			// Offset always points at the blob start; the marker and offset
+			// map are derived backwards from Offset (see StringEntrySizeOffset /
+			// StringOffsetMapOffset), the same way NullBitmapOffset derives
+			// backwards from Offset for fixed-width columns.
+			entrySizes[i] = EntrySizeForBlobLen(columnTypes[i].bytesSeen)
+			offsetMapSize := uint64(entrySizes[i]) * (head.RowCount + 1)
+			offset += int(offsetMapSize) + 1
+			head.Columns[i].Offset = uint64(offset)
+			offset += int(columnTypes[i].bytesSeen)
+		} else if head.Columns[i].Type == TypeDecimal {
+			offset += 2 // precision and scale
+			head.Columns[i].Offset = uint64(offset)
+			precision := columnTypes[i].maxIntDigits + columnTypes[i].maxScale
+			cellSize := precisionToByteSize(precision)
+			offset += int(head.RowCount) * cellSize
+		} else {
+			head.Columns[i].Offset = uint64(offset)
+			offset += int(head.RowCount) * ByteSizeForType(head.Columns[i].Type)
+		}
 	}
 	// -------------------------------------------------------------
 
@@ -442,6 +655,31 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		return Table{}, err
 	}
 
+	// write each string column's entrySize marker once, up front
+	// write each decimal column's precision and scale once, up front
+	// per column so it never needs to be touched again during the row loop
+	for i := range head.Columns {
+		if head.Columns[i].Type == TypeDecimal {
+			pOffset := head.Columns[i].DecimalPrecisionOffset()
+			_, err = jdbFile.WriteAt([]byte{columnTypes[i].maxIntDigits + columnTypes[i].maxScale}, int64(pOffset))
+			if err != nil {
+				return Table{}, err
+			}
+			sOffset := head.Columns[i].DecimalScaleOffset()
+			_, err = jdbFile.WriteAt([]byte{columnTypes[i].maxScale}, int64(sOffset))
+			if err != nil {
+				return Table{}, err
+			}
+		}
+		if head.Columns[i].Type == TypeString {
+			markerOffset := head.Columns[i].StringEntrySizeOffset()
+			_, err = jdbFile.WriteAt([]byte{entrySizes[i]}, int64(markerOffset))
+			if err != nil {
+				return Table{}, err
+			}
+		}
+	}
+
 	// row loop
 	for rowIdx := 0; ; rowIdx++ {
 		row, err := reader.Read()
@@ -457,52 +695,36 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 
 		// column loop
 		for colIdx, col := range row {
+			colMeta := head.Columns[colIdx]
 
-			// get null bitmap offset for this column (if any)
-			var bitmapOffset uint64
-			if head.Columns[colIdx].HasNulls {
-				bitmapOffset = head.Columns[colIdx].NullBitmapOffset(head.RowCount)
+			// if null, set the bit in the bitmap; the dispatched writer below
+			// still handles skipping/zero-filling its own data for this cell.
+			// TypeString's bitmap sits before the offset map + marker, not
+			// immediately before Offset, so it needs its own derivation.
+			if col == "" && colMeta.HasNulls {
+				var bitmapOffset uint64
+				if colMeta.Type == TypeString {
+					bitmapOffset = colMeta.StringNullBitmapOffset(head.RowCount, entrySizes[colIdx])
+				} else if colMeta.Type == TypeDecimal {
+					bitmapOffset = colMeta.DecimalPrecisionOffset() - (head.RowCount+7)/8
+				} else {
+					bitmapOffset = colMeta.NullBitmapOffset(head.RowCount)
+				}
+				if err := writeBitmap(jdbFile, bitmapOffset, rowIdx); err != nil {
+					return Table{}, err
+				}
 			}
 
-			// get byte count for this column's type
-			byteCount := ByteSizeForType(head.Columns[colIdx].Type)
-
-			// get data offset for this column AND row
-			dataOffset := head.Columns[colIdx].Offset + uint64(rowIdx)*uint64(byteCount) // base offset + row offset
-
-			// if nulls, set the bit in the bitmap and skip writing data
-			if col == "" && head.Columns[colIdx].HasNulls {
-				byteIdx := rowIdx / 8
-				bitIdx := rowIdx % 8
-				// read the byte, set the bit, write it back
-				b := make([]byte, 1)
-				_, err = jdbFile.ReadAt(b, int64(bitmapOffset+uint64(byteIdx))) // read the byte at the bitmap offset
-				if err != nil {
-					return Table{}, err
-				}
-				b[0] |= 1 << bitIdx                                              // set the bit for this row
-				_, err = jdbFile.WriteAt(b, int64(bitmapOffset+uint64(byteIdx))) // write the byte back
-				if err != nil {
-					return Table{}, err
-				}
-
-				// write empyte byte(s) for this cell
-				emptyBytes := make([]byte, byteCount)
-				_, err = jdbFile.WriteAt(emptyBytes, int64(dataOffset))
-				if err != nil {
-					return Table{}, err
-				}
-			} else { // else write the data for this cell
-
-				// convert to the correct type and write it to the file at the correct offset
-				dataBytes, err := EncodeCell(head.Columns[colIdx].Type, col)
-				if err != nil {
-					return Table{}, err
-				}
-				_, err = jdbFile.WriteAt(dataBytes, int64(dataOffset))
-				if err != nil {
-					return Table{}, err
-				}
+			switch colMeta.Type {
+			case TypeString:
+				err = writeString(jdbFile, colMeta, rowIdx, col, entrySizes[colIdx], head.RowCount)
+			case TypeDecimal:
+				err = writeDecimal(jdbFile, colMeta, rowIdx, col, columnTypes[colIdx].maxIntDigits+columnTypes[colIdx].maxScale, columnTypes[colIdx].maxScale)
+			default:
+				err = writeGeneric(jdbFile, colMeta, rowIdx, col)
+			}
+			if err != nil {
+				return Table{}, err
 			}
 		}
 	}

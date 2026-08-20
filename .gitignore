@@ -3,3 +3,5 @@
 *.jdb
 !test.csv
 !test.jdb
+.claude/
+benchmark_data/
