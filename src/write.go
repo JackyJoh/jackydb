@@ -677,10 +677,43 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		}
 	}
 
+	// intialize the ColumnWriter's for each column; used to batch sycalls instead of one per cell
+	buffers := make([]*ColumnWriters, head.ColumnCount)
+	for Idx, col := range head.Columns {
+
+		// create 3 region writers
+		nbm := (*RegionWriter)(nil)
+		off := (*RegionWriter)(nil)
+		generic := (*RegionWriter)(nil)
+		if col.HasNulls {
+			nbm = newRegionWriter(jdbFile, regionBitmap, col.NullBitmapOffset(head.RowCount, entrySizes[Idx]), col.NullBitmapOffset(head.RowCount, entrySizes[Idx])+(head.RowCount+7)/8)
+		}
+		if col.Type == TypeString {
+			off = newRegionWriter(jdbFile, regionOffsetMap, col.StringOffsetMapOffset(head.RowCount, entrySizes[Idx]), col.StringEntrySizeOffset())
+		}
+		var dataEnd uint64
+		switch col.Type {
+		case TypeString:
+			dataEnd = col.Offset + columnTypes[Idx].bytesSeen
+		case TypeDecimal:
+			byteWidth := precisionToByteSize(columnTypes[Idx].maxIntDigits + columnTypes[Idx].maxScale)
+			dataEnd = col.Offset + head.RowCount*uint64(byteWidth)
+		default:
+			dataEnd = col.Offset + head.RowCount*uint64(ByteSizeForType(col.Type))
+		}
+		generic = newRegionWriter(jdbFile, regionData, col.Offset, dataEnd)
+
+		// store the 3 writers
+		buffers[Idx] = &ColumnWriters{
+			nbmWriter:       nbm,
+			offsetMapWriter: off,
+			dataWriter:      generic,
+		}
+	}
+
 	// one running "next blob write position" counter per column, read/updated
 	// in place by writeString instead of ReadAt'ing it back from the offset
-	// map each row; zero value is exactly right for row 0. Only TypeString
-	// columns ever touch their slot.
+	// map each row; Only TypeString columns ever touch their slot.
 	runningOffsets := make([]uint64, head.ColumnCount)
 
 	// row loop
@@ -702,17 +735,8 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 
 			// if null, set the bit in the bitmap; the dispatched writer below
 			// still handles skipping/zero-filling its own data for this cell.
-			// TypeString's bitmap sits before the offset map + marker, not
-			// immediately before Offset, so it needs its own derivation.
 			if col == "" && colMeta.HasNulls {
-				var bitmapOffset uint64
-				if colMeta.Type == TypeString {
-					bitmapOffset = colMeta.StringNullBitmapOffset(head.RowCount, entrySizes[colIdx])
-				} else if colMeta.Type == TypeDecimal {
-					bitmapOffset = colMeta.DecimalPrecisionOffset() - (head.RowCount+7)/8
-				} else {
-					bitmapOffset = colMeta.NullBitmapOffset(head.RowCount)
-				}
+				bitmapOffset := colMeta.NullBitmapOffset(head.RowCount, entrySizes[colIdx])
 				if err := writeBitmap(jdbFile, bitmapOffset, rowIdx); err != nil {
 					return Table{}, err
 				}

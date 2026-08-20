@@ -29,46 +29,37 @@ type ColumnMeta struct {
 	Name     string
 }
 
-// NullBitmapOffset returns where this column's null bitmap starts, derived
-// from Offset and the table's row count (the bitmap always sits immediately
-// before the column's data). Only meaningful when HasNulls is true.
-func (c ColumnMeta) NullBitmapOffset(rowCount uint64) uint64 {
-	return c.Offset - (rowCount+7)/8
+// NullBitmapOffset returns the start offset of the column's null bitmap.
+func (c ColumnMeta) NullBitmapOffset(rowCount uint64, entrySize uint8) uint64 {
+	bitmapSize := (rowCount + 7) / 8
+	switch c.Type {
+	case TypeString:
+		return c.StringOffsetMapOffset(rowCount, entrySize) - bitmapSize
+	case TypeDecimal:
+		return c.DecimalPrecisionOffset() - bitmapSize
+	default:
+		return c.Offset - bitmapSize
+	}
 }
 
-// StringEntrySizeOffset returns where this column's 1-byte entrySize marker
-// is stored, derived from Offset (the marker always sits immediately before
-// the blob). Only meaningful when Type == TypeString.
+// StringEntrySizeOffset returns the offset of the column's entrySize marker byte.
 func (c ColumnMeta) StringEntrySizeOffset() uint64 {
 	return c.Offset - 1
 }
 
-// DecimalPrecisionOffset returns where this column's 1-byte precision marker
-// is stored, derived from Offset (the marker always sits immediately before
-// the blob). Only meaningful when Type == TypeDecimal.
+// DecimalPrecisionOffset returns the offset of the column's precision marker byte.
 func (c ColumnMeta) DecimalPrecisionOffset() uint64 {
 	return c.Offset - 2
 }
 
-// DecimalScaleOffset returns where this column's 1-byte scale marker
-// is stored, derived from Offset (the marker always sits immediately before
-// the blob). Only meaningful when Type == TypeDecimal.
+// DecimalScaleOffset returns the offset of the column's scale marker byte.
 func (c ColumnMeta) DecimalScaleOffset() uint64 {
 	return c.Offset - 1
 }
 
-// StringOffsetMapOffset returns where this column's offset map starts,
-// derived from the entrySize marker position and rowCount. Only meaningful
-// when Type == TypeString.
+// StringOffsetMapOffset returns the start offset of the column's string offset map.
 func (c ColumnMeta) StringOffsetMapOffset(rowCount uint64, entrySize uint8) uint64 {
 	return c.StringEntrySizeOffset() - uint64(entrySize)*(rowCount+1)
-}
-
-// StringNullBitmapOffset returns where a TypeString column's null bitmap
-// starts - immediately before the offset map, not immediately before Offset
-// like NullBitmapOffset. Only meaningful when HasNulls is true.
-func (c ColumnMeta) StringNullBitmapOffset(rowCount uint64, entrySize uint8) uint64 {
-	return c.StringOffsetMapOffset(rowCount, entrySize) - (rowCount+7)/8
 }
 
 var MagicConst [5]byte = [5]byte{'j', 'a', 'c', 'k', 'y'}
