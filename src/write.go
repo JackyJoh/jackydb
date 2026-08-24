@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"encoding/csv"
 	"errors"
@@ -471,7 +472,11 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 
 	head := Header{}
 	table := Table{}
-	reader := csv.NewReader(file)
+	// 1MB read buffer, vs the 4KB csv.NewReader uses internally.
+	// ReuseRecord reuses the row slice each Read; the field strings are still
+	// freshly allocated, so copying one out stays safe.
+	reader := csv.NewReader(bufio.NewReaderSize(file, 1<<20))
+	reader.ReuseRecord = true
 
 	// FIRST PASS
 	// -------------------------------------------------------------
@@ -637,7 +642,8 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 	// -------------------------------------------------------------
 	// stream rows into jdb file
 	file.Seek(0, io.SeekStart)
-	reader = csv.NewReader(file)
+	reader = csv.NewReader(bufio.NewReaderSize(file, 1<<20))
+	reader.ReuseRecord = true
 
 	// skip header row
 	_, err = reader.Read()

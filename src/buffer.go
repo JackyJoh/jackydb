@@ -33,14 +33,20 @@ type RegionWriter struct {
 	end     uint64 // where this region ends in the file (estimated)
 }
 
+// maxRegionBufSize caps a region's write buffer. A syscall costs about the same
+// for 4KB as for 256KB, so a bigger buffer spreads that cost over more bytes.
+const maxRegionBufSize = 256 * 1024
+
 // newRegionWriter creates a new RegionWriter for a specific region of a column,
 // with an appropriate buffer size based on the region type. It initializes the
 // buffered writer and offset writer, and sets the start and end offsets for the region.
 func newRegionWriter(file *os.File, kind regionType, start uint64, end uint64) *RegionWriter {
 
-	bufSize := 4 * 1024 // 4KB buffer
-	if kind == regionBitmap {
-		bufSize = 512 // bitmap writes are small
+	// capped, not fixed: a region smaller than the cap gets a buffer its exact
+	// size, so small tables don't allocate 256KB per region
+	bufSize := maxRegionBufSize
+	if regionSize := end - start; regionSize < uint64(maxRegionBufSize) {
+		bufSize = int(regionSize)
 	}
 
 	ow := io.NewOffsetWriter(file, int64(start))

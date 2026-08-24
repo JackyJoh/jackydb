@@ -20,4 +20,4 @@ Buffered writes - yellow_tripdata_2019-01.csv (7,667,792 rows x 18 cols)
 
 Pre buffer:   687,088,084 bytes in 746.713s (12m26.7s) -- 0.88 MB/s
 Post buffer:  687,088,084 bytes in 29.836s -- 21.96 MB/s
-25.03x faster (96% less time)
+Bigger buffers (256KB writes, 1MB reads, ReuseRecord): 25.280s -- 25.92 MB/s
