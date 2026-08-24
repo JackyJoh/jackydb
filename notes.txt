@@ -14,6 +14,10 @@ Before minimizing default Varchar: 68881 bytes (48304 bytes csv for comparison)
 After minimizing default Varchar (14 bytes) : 59881 bytes
 Bytes saved: 9000 ~13% less
 ~42.6% less compressed than csv
+__________________________________________
 
+Buffered writes - yellow_tripdata_2019-01.csv (7,667,792 rows x 18 cols)
 
-Wrote 32833 rows to ../spotify_songs.jdb in 1.1068013s
+Pre buffer:   687,088,084 bytes in 746.713s (12m26.7s) -- 0.88 MB/s
+Post buffer:  687,088,084 bytes in 29.836s -- 21.96 MB/s
+25.03x faster (96% less time)
