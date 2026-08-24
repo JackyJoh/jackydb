@@ -750,20 +750,21 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		}
 	}
 
-	// flush all the buffered writers to the file
+	// flush all the buffered writers to the file, verifying each region
+	// landed exactly where the offset math predicted
 	for _, buf := range buffers {
 		if buf.nbmWriter != nil {
-			if err := buf.nbmWriter.bw.Flush(); err != nil {
+			if err := buf.nbmWriter.flushAndVerify(); err != nil {
 				return Table{}, err
 			}
 		}
 		if buf.offsetMapWriter != nil {
-			if err := buf.offsetMapWriter.bw.Flush(); err != nil {
+			if err := buf.offsetMapWriter.flushAndVerify(); err != nil {
 				return Table{}, err
 			}
 		}
 		if buf.dataWriter != nil {
-			if err := buf.dataWriter.bw.Flush(); err != nil {
+			if err := buf.dataWriter.flushAndVerify(); err != nil {
 				return Table{}, err
 			}
 		}

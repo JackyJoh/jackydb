@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"os"
 )
@@ -51,4 +52,20 @@ func newRegionWriter(file *os.File, kind regionType, start uint64, end uint64) *
 		start: start,
 		end:   end,
 	}
+}
+
+// flushAndVerify flushes rw's buffer, then asserts the region ended up
+// exactly end-start bytes long.
+func (rw *RegionWriter) flushAndVerify() error {
+	if err := rw.bw.Flush(); err != nil {
+		return err
+	}
+	pos, err := rw.ow.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	if uint64(pos) != rw.end-rw.start {
+		return fmt.Errorf("region kind %d [%d,%d): wrote %d bytes, expected %d", rw.kind, rw.start, rw.end, pos, rw.end-rw.start)
+	}
+	return nil
 }
