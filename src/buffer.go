@@ -24,11 +24,12 @@ type ColumnWriters struct {
 
 type RegionWriter struct {
 	// a writer for a specific region of a column
-	bw    *bufio.Writer    // buffered writer for this region
-	ow    *io.OffsetWriter // tracks the current write offset
-	kind  regionType
-	start uint64 // where this region starts in the file
-	end   uint64 // where this region ends in the file (estimated)
+	bw      *bufio.Writer    // buffered writer for this region
+	ow      *io.OffsetWriter // tracks the current write offset
+	kind    regionType
+	curByte uint8  // current byte being written (for bitmap)
+	start   uint64 // where this region starts in the file
+	end     uint64 // where this region ends in the file (estimated)
 }
 
 // newRegionWriter creates a new RegionWriter for a specific region of a column,

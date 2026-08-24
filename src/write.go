@@ -280,19 +280,22 @@ func TestType(colType uint8, cell string) error {
 	return err
 }
 
-// writeBitmap sets the null bit for rowIdx in the bitmap starting at
-// bitmapOffset. One bit per row, so no type parameter is needed.
-func writeBitmap(file *os.File, bitmapOffset uint64, rowIdx int) error {
-	byteIdx := rowIdx / 8
+// writeBitmapBit sets or clears rowIdx's bit in rw's in-memory curByte, then
+// flushes curByte through rw's bw once every 8 rows or on the final row.
+func writeBitmapBit(rw *RegionWriter, rowIdx int, rowCount uint64, isNull bool) error {
 	bitIdx := rowIdx % 8
-
-	b := make([]byte, 1)
-	if _, err := file.ReadAt(b, int64(bitmapOffset+uint64(byteIdx))); err != nil {
-		return err
+	if isNull {
+		rw.curByte |= 1 << bitIdx
+	} else {
+		rw.curByte &^= 1 << bitIdx
 	}
-	b[0] |= 1 << bitIdx
-	_, err := file.WriteAt(b, int64(bitmapOffset+uint64(byteIdx)))
-	return err
+	if bitIdx == 7 || rowIdx == int(rowCount)-1 {
+		if _, err := rw.bw.Write([]byte{rw.curByte}); err != nil {
+			return err
+		}
+		rw.curByte = 0
+	}
+	return nil
 }
 
 // writeGeneric writes a single fixed-width cell: every type with no extra
@@ -733,11 +736,8 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		for colIdx, col := range row {
 			colMeta := head.Columns[colIdx]
 
-			// if null, set the bit in the bitmap; the dispatched writer below
-			// still handles skipping/zero-filling its own data for this cell.
-			if col == "" && colMeta.HasNulls {
-				bitmapOffset := colMeta.NullBitmapOffset(head.RowCount, entrySizes[colIdx])
-				if err := writeBitmap(jdbFile, bitmapOffset, rowIdx); err != nil {
+			if colMeta.HasNulls {
+				if err := writeBitmapBit(buffers[colIdx].nbmWriter, rowIdx, head.RowCount, col == ""); err != nil {
 					return Table{}, err
 				}
 			}
