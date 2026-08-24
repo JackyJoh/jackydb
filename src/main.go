@@ -1,17 +1,24 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 func main() {
 
 	testFile := "../test.csv"
 
 	// convert the CSV into a .jdb file, inferring column types automatically
+	// track time taken to write the .jdb file
+	startTime := time.Now()
 	table, err := WriteCSV(testFile, "", nil)
 	if err != nil {
 		fmt.Println("error:", err)
 		return
 	}
+	endTime := time.Now()
+	fmt.Printf("Wrote %d rows to %s in %v\n", table.Head.RowCount, table.File, endTime.Sub(startTime))
 
 	// read the header back from the .jdb file WriteCSV just produced
 	readHeader, err := ReadHeader(table.File)

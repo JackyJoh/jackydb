@@ -280,29 +280,31 @@ func TestType(colType uint8, cell string) error {
 	return err
 }
 
-// writeBitmap sets the null bit for rowIdx in the bitmap starting at
-// bitmapOffset. One bit per row, so no type parameter is needed.
-func writeBitmap(file *os.File, bitmapOffset uint64, rowIdx int) error {
-	byteIdx := rowIdx / 8
+// writeBitmapBit sets or clears rowIdx's bit in rw's in-memory curByte, then
+// flushes curByte through rw's bw once every 8 rows or on the final row.
+func writeBitmapBit(rw *RegionWriter, rowIdx int, rowCount uint64, isNull bool) error {
 	bitIdx := rowIdx % 8
-
-	b := make([]byte, 1)
-	if _, err := file.ReadAt(b, int64(bitmapOffset+uint64(byteIdx))); err != nil {
-		return err
+	if isNull {
+		rw.curByte |= 1 << bitIdx
+	} else {
+		rw.curByte &^= 1 << bitIdx
 	}
-	b[0] |= 1 << bitIdx
-	_, err := file.WriteAt(b, int64(bitmapOffset+uint64(byteIdx)))
-	return err
+	if bitIdx == 7 || rowIdx == int(rowCount)-1 {
+		if _, err := rw.bw.Write([]byte{rw.curByte}); err != nil {
+			return err
+		}
+		rw.curByte = 0
+	}
+	return nil
 }
 
 // writeGeneric writes a single fixed-width cell: every type with no extra
 // pre-offset structure (ints, uints, floats, bool, date)
-func writeGeneric(file *os.File, col ColumnMeta, rowIdx int, cell string) error {
+func writeGeneric(col ColumnMeta, cell string, writers *ColumnWriters) error {
 	byteCount := ByteSizeForType(col.Type)
-	dataOffset := col.Offset + uint64(rowIdx)*uint64(byteCount)
 
 	if cell == "" && col.HasNulls {
-		_, err := file.WriteAt(make([]byte, byteCount), int64(dataOffset))
+		_, err := writers.dataWriter.bw.Write(make([]byte, byteCount))
 		return err
 	}
 
@@ -310,7 +312,7 @@ func writeGeneric(file *os.File, col ColumnMeta, rowIdx int, cell string) error 
 	if err != nil {
 		return err
 	}
-	_, err = file.WriteAt(dataBytes, int64(dataOffset))
+	_, err = writers.dataWriter.bw.Write(dataBytes)
 	return err
 }
 
@@ -346,39 +348,28 @@ func decodeOffsetEntry(b []byte, entrySize uint8) uint64 {
 	}
 }
 
-// writeString writes a single TypeString cell: it reads the row's starting
-// blob offset back from the offset map (already on disk from the previous
-// row's write, or zero-filled by Truncate for row 0), writes the cell's
-// bytes into the blob at that position, then advances the offset map by
-// len(cell) for the next row to read. The entrySize marker itself is
-// written once per column before the row loop starts, not here.
-func writeString(file *os.File, col ColumnMeta, rowIdx int, cell string, entrySize uint8, rowCount uint64) error {
-	offsetMapStart := col.StringOffsetMapOffset(rowCount, entrySize)
-
-	// read the previous row's starting offset
-	prevBytes := make([]byte, entrySize)
-	if _, err := file.ReadAt(prevBytes, int64(offsetMapStart+uint64(rowIdx)*uint64(entrySize))); err != nil {
-		return err
-	}
-	prevOffset := decodeOffsetEntry(prevBytes, entrySize)
+// writeString writes a single TypeString cell's blob bytes (if non-null) and
+// its offset-map entry, advancing *prevOffset by len(cell).
+func writeString(col ColumnMeta, cell string, entrySize uint8, rowCount uint64, prevOffset *uint64, writers *ColumnWriters) error {
 
 	// write the cell's bytes into the blob at the previous row's offset
 	// update the next row's offset to be the previous offset + len(cell)
-	nextOffset := prevOffset
+	nextOffset := *prevOffset
 	if cell == "" && col.HasNulls {
 		// null cell: offsetMap[rowIdx+1] = offsetMap[rowIdx] + 0, no blob bytes written
 	} else {
-		blobPos := col.Offset + prevOffset
-		if _, err := file.WriteAt([]byte(cell), int64(blobPos)); err != nil {
+		if _, err := writers.dataWriter.bw.Write([]byte(cell)); err != nil {
 			return err
 		}
 		nextOffset += uint64(len(cell))
 	}
 
 	// write the next row's starting offset into the offset map
-	nextEntryOffset := offsetMapStart + uint64(rowIdx+1)*uint64(entrySize)
-	_, err := file.WriteAt(encodeOffsetEntry(nextOffset, entrySize), int64(nextEntryOffset))
-	return err
+	if _, err := writers.offsetMapWriter.bw.Write(encodeOffsetEntry(nextOffset, entrySize)); err != nil {
+		return err
+	}
+	*prevOffset = nextOffset
+	return nil
 }
 
 // precisionToByteSize returns the byte width needed to hold a TypeDecimal
@@ -422,12 +413,11 @@ func encodeDecimalMantissa(cell string, byteWidth int) ([]byte, error) {
 // writeDecimal writes a single TypeDecimal cell: pads the fractional digits
 // out to the column's scale, strips the '.', then encodes the resulting
 // digit string as a fixed-width signed integer mantissa.
-func writeDecimal(file *os.File, col ColumnMeta, rowIdx int, cell string, precision uint8, scale uint8) error {
+func writeDecimal(col ColumnMeta, cell string, precision uint8, scale uint8, writers *ColumnWriters) error {
 	byteWidth := precisionToByteSize(precision)
-	dataOffset := col.Offset + uint64(rowIdx)*uint64(byteWidth)
 
 	if cell == "" && col.HasNulls {
-		_, err := file.WriteAt(make([]byte, byteWidth), int64(dataOffset))
+		_, err := writers.dataWriter.bw.Write(make([]byte, byteWidth))
 		return err
 	}
 
@@ -448,7 +438,7 @@ func writeDecimal(file *os.File, col ColumnMeta, rowIdx int, cell string, precis
 	if err != nil {
 		return err
 	}
-	_, err = file.WriteAt(dataBytes, int64(dataOffset))
+	_, err = writers.dataWriter.bw.Write(dataBytes)
 	return err
 }
 
@@ -655,9 +645,44 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		return Table{}, err
 	}
 
-	// write each string column's entrySize marker once, up front
-	// write each decimal column's precision and scale once, up front
-	// per column so it never needs to be touched again during the row loop
+	// intialize the ColumnWriter's for each column; used to batch sycalls instead of one per cell
+	buffers := make([]*ColumnWriters, head.ColumnCount)
+	for Idx, col := range head.Columns {
+
+		// create 3 region writers
+		nbm := (*RegionWriter)(nil)
+		off := (*RegionWriter)(nil)
+		generic := (*RegionWriter)(nil)
+		if col.HasNulls {
+			nbm = newRegionWriter(jdbFile, regionBitmap, col.NullBitmapOffset(head.RowCount, entrySizes[Idx]), col.NullBitmapOffset(head.RowCount, entrySizes[Idx])+(head.RowCount+7)/8)
+		}
+		if col.Type == TypeString {
+			off = newRegionWriter(jdbFile, regionOffsetMap, col.StringOffsetMapOffset(head.RowCount, entrySizes[Idx]), col.StringEntrySizeOffset())
+		}
+		var dataEnd uint64
+		switch col.Type {
+		case TypeString:
+			dataEnd = col.Offset + columnTypes[Idx].bytesSeen
+		case TypeDecimal:
+			byteWidth := precisionToByteSize(columnTypes[Idx].maxIntDigits + columnTypes[Idx].maxScale)
+			dataEnd = col.Offset + head.RowCount*uint64(byteWidth)
+		default:
+			dataEnd = col.Offset + head.RowCount*uint64(ByteSizeForType(col.Type))
+		}
+		generic = newRegionWriter(jdbFile, regionData, col.Offset, dataEnd)
+
+		// store the 3 writers
+		buffers[Idx] = &ColumnWriters{
+			nbmWriter:       nbm,
+			offsetMapWriter: off,
+			dataWriter:      generic,
+		}
+	}
+
+	// write each string column's entrySize marker and leading offset-map
+	// zero entry once, up front; write each decimal column's precision and
+	// scale once, up front. per column so it never needs to be touched again
+	// during the row loop
 	for i := range head.Columns {
 		if head.Columns[i].Type == TypeDecimal {
 			pOffset := head.Columns[i].DecimalPrecisionOffset()
@@ -677,8 +702,16 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 			if err != nil {
 				return Table{}, err
 			}
+			if _, err := buffers[i].offsetMapWriter.bw.Write(encodeOffsetEntry(0, entrySizes[i])); err != nil {
+				return Table{}, err
+			}
 		}
 	}
+
+	// one running "next blob write position" counter per column, read/updated
+	// in place by writeString instead of ReadAt'ing it back from the offset
+	// map each row; Only TypeString columns ever touch their slot.
+	runningOffsets := make([]uint64, head.ColumnCount)
 
 	// row loop
 	for rowIdx := 0; ; rowIdx++ {
@@ -697,33 +730,41 @@ func WriteCSV(csvFilename string, jdbFilename string, colTypes []string) (Table,
 		for colIdx, col := range row {
 			colMeta := head.Columns[colIdx]
 
-			// if null, set the bit in the bitmap; the dispatched writer below
-			// still handles skipping/zero-filling its own data for this cell.
-			// TypeString's bitmap sits before the offset map + marker, not
-			// immediately before Offset, so it needs its own derivation.
-			if col == "" && colMeta.HasNulls {
-				var bitmapOffset uint64
-				if colMeta.Type == TypeString {
-					bitmapOffset = colMeta.StringNullBitmapOffset(head.RowCount, entrySizes[colIdx])
-				} else if colMeta.Type == TypeDecimal {
-					bitmapOffset = colMeta.DecimalPrecisionOffset() - (head.RowCount+7)/8
-				} else {
-					bitmapOffset = colMeta.NullBitmapOffset(head.RowCount)
-				}
-				if err := writeBitmap(jdbFile, bitmapOffset, rowIdx); err != nil {
+			if colMeta.HasNulls {
+				if err := writeBitmapBit(buffers[colIdx].nbmWriter, rowIdx, head.RowCount, col == ""); err != nil {
 					return Table{}, err
 				}
 			}
 
 			switch colMeta.Type {
 			case TypeString:
-				err = writeString(jdbFile, colMeta, rowIdx, col, entrySizes[colIdx], head.RowCount)
+				err = writeString(colMeta, col, entrySizes[colIdx], head.RowCount, &runningOffsets[colIdx], buffers[colIdx])
 			case TypeDecimal:
-				err = writeDecimal(jdbFile, colMeta, rowIdx, col, columnTypes[colIdx].maxIntDigits+columnTypes[colIdx].maxScale, columnTypes[colIdx].maxScale)
+				err = writeDecimal(colMeta, col, columnTypes[colIdx].maxIntDigits+columnTypes[colIdx].maxScale, columnTypes[colIdx].maxScale, buffers[colIdx])
 			default:
-				err = writeGeneric(jdbFile, colMeta, rowIdx, col)
+				err = writeGeneric(colMeta, col, buffers[colIdx])
 			}
 			if err != nil {
+				return Table{}, err
+			}
+		}
+	}
+
+	// flush all the buffered writers to the file, verifying each region
+	// landed exactly where the offset math predicted
+	for _, buf := range buffers {
+		if buf.nbmWriter != nil {
+			if err := buf.nbmWriter.flushAndVerify(); err != nil {
+				return Table{}, err
+			}
+		}
+		if buf.offsetMapWriter != nil {
+			if err := buf.offsetMapWriter.flushAndVerify(); err != nil {
+				return Table{}, err
+			}
+		}
+		if buf.dataWriter != nil {
+			if err := buf.dataWriter.flushAndVerify(); err != nil {
 				return Table{}, err
 			}
 		}
